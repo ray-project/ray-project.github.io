@@ -1,0 +1,1329 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.8.5">Jekyll</generator><link href="/feed.xml" rel="self" type="application/atom+xml" /><link href="/" rel="alternate" type="text/html" /><updated>2019-12-07T22:35:29+00:00</updated><id>/feed.xml</id><title type="html">Ray: A fast and simple framework for distributed applications</title><subtitle>Ray is a fast and simple framework for building and running distributed applications.
+</subtitle><entry><title type="html">Implementing A Parameter Server in 15 Lines of Python with Ray</title><link href="/2018/07/15/parameter-server-in-fifteen-lines.html" rel="alternate" type="text/html" title="Implementing A Parameter Server in 15 Lines of Python with Ray" /><published>2018-07-15T14:00:00+00:00</published><updated>2018-07-15T14:00:00+00:00</updated><id>/2018/07/15/parameter-server-in-fifteen-lines</id><content type="html" xml:base="/2018/07/15/parameter-server-in-fifteen-lines.html">&lt;p&gt;Parameter servers are a core part of many machine learning applications. Their
+role is to store the &lt;em&gt;parameters&lt;/em&gt; of a machine learning model (e.g., the weights
+of a neural network) and to &lt;em&gt;serve&lt;/em&gt; them to clients (clients are often workers
+that process data and compute updates to the parameters).&lt;/p&gt;
+
+&lt;p&gt;Parameter servers (like databases) are normally built and shipped as standalone
+systems. This post describes how to use &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt; to implement a parameter server
+in a few lines of code.&lt;/p&gt;
+
+&lt;p&gt;By turning the parameter server from a “system” into an “application”, this
+approach makes it orders of magnitude simpler to deploy parameter server
+applications. Similarly, by allowing applications and libraries to implement
+their own parameter servers, this approach makes the behavior of the parameter
+server much more configurable and flexible (since the application can simply
+modify the implementation with a few lines of Python).&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;What is Ray?&lt;/strong&gt; &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt; is a general-purpose framework for parallel and
+distributed Python. Ray provides a unified task-parallel and actor abstraction
+and achieves high performance through shared memory, zero-copy serialization,
+and distributed scheduling. Ray also includes high-performance libraries
+targeting AI applications, for example &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;hyperparameter tuning&lt;/a&gt; and
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;reinforcement learning&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2 id=&quot;what-is-a-parameter-server&quot;&gt;What is a Parameter Server?&lt;/h2&gt;
+
+&lt;p&gt;A parameter server is a key-value store used for training machine learning
+models on a cluster. The &lt;strong&gt;values&lt;/strong&gt; are the parameters of a machine-learning
+model (e.g., a neural network). The &lt;strong&gt;keys&lt;/strong&gt; index the model parameters.&lt;/p&gt;
+
+&lt;p&gt;For example, in a movie &lt;strong&gt;recommendation system&lt;/strong&gt;, there may be one key per user
+and one key per movie. For each user and movie, there are corresponding
+user-specific and movie-specific parameters. In a &lt;strong&gt;language-modeling&lt;/strong&gt;
+application, words may act as keys and their embeddings may be the values. In
+its simplest form, a parameter server may implicitly have a single key and allow
+all of the parameters to be retrieved and updated at once. We show how such a
+parameter server can be implemented as a Ray actor (15 lines) below.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray&lt;/span&gt;
+
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;nc&quot;&gt;ParameterServer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;__init__&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dim&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Alternatively, params could be a dictionary mapping keys to arrays.
+&lt;/span&gt;        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;zeros&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dim&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;update_params&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;@ray.remote&lt;/code&gt; decorator defines a service.&lt;/strong&gt; It takes the
+&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ParameterServer&lt;/code&gt; class and allows it to be instantiated as a remote service or
+actor.&lt;/p&gt;
+
+&lt;p&gt;Here, we assume that the update is a gradient which should be added to the
+parameter vector. This is just the simplest possible example, and many different
+choices could be made.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;A parameter server typically exists as a remote process or service&lt;/strong&gt; and
+interacts with clients through remote procedure calls. To instantiate the
+parameter server as a remote actor, we can do the following.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;c1&quot;&gt;# We need to start Ray first.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Create a parameter server process.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ParameterServer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;Actor method invocations return futures.&lt;/strong&gt; If we want to retrieve the actual
+values, we can use a blocking &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt; call. For example,&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;o&quot;&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;params_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This returns a future.
+&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;params_id&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;ObjectID&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;7268&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cb8d345ef26632430df6f18cc9690eb6b300&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This blocks until the task finishes.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Now, suppose we want to start some worker tasks that continuously compute
+gradients and update the model parameters. Each worker will run in a loop that
+does three things:&lt;/p&gt;
+&lt;ol&gt;
+  &lt;li&gt;Get the latest parameters.&lt;/li&gt;
+  &lt;li&gt;Compute an update to the parameters.&lt;/li&gt;
+  &lt;li&gt;Update the parameters.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;As a Ray remote function (though the worker could also be an actor), this looks
+like the following.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;time&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Note that the worker function takes a handle to the parameter server as an
+# argument, which allows the worker task to invoke methods on the parameter
+# server actor.
+&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;worker&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Get the latest parameters.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;params_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This method call is non-blocking
+&lt;/span&gt;                                            &lt;span class=&quot;c1&quot;&gt;# and returns a future.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This is a blocking call which waits for
+&lt;/span&gt;                                     &lt;span class=&quot;c1&quot;&gt;# the task to finish and gets the results.
+&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Compute a gradient update. Here we just make a fake update, but in
+&lt;/span&gt;        &lt;span class=&quot;c1&quot;&gt;# practice this would use a library like TensorFlow and would also take
+&lt;/span&gt;        &lt;span class=&quot;c1&quot;&gt;# in a batch of data.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ones&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This is a fake placeholder for some computation.
+&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Update the parameters.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;update_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Then we can start several worker tasks as follows.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;c1&quot;&gt;# Start 2 workers.
+&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;worker&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Then we can retrieve the parameters from the driver process and see that they
+are being updated by the workers.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;o&quot;&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;64.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;78.&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Part of the value that Ray adds here is that &lt;em&gt;Ray makes it as easy to start up a
+remote service or actor as it is to define a Python class&lt;/em&gt;. Handles to the actor
+can be passed around to other actors and tasks to allow arbitrary and intuitive
+messaging and communication patterns. Current alternatives are much more
+involved. For example, &lt;a href=&quot;https://grpc.io/docs/tutorials/basic/python.html#defining-the-service&quot;&gt;consider how the equivalent runtime service creation and
+service handle passing would be done with GRPC&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2 id=&quot;additional-extensions&quot;&gt;Additional Extensions&lt;/h2&gt;
+
+&lt;p&gt;Here we describe some important modifications to the above design. We describe
+additional natural extensions in &lt;a href=&quot;http://www.sysml.cc/doc/206.pdf&quot;&gt;this paper&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Sharding Across Multiple Parameter Servers:&lt;/strong&gt; When your parameters are large
+and your cluster is large, a single parameter server may not suffice because the
+application could be bottlenecked by the network bandwidth into and out of the
+machine that the parameter server is on (especially if there are many workers).&lt;/p&gt;
+
+&lt;p&gt;A natural solution in this case is to shard the parameters across multiple
+parameter servers. This can be achieved by simply starting up multiple parameter
+server actors. An example of how to do this is shown in the code example at the
+bottom.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Controlling Actor Placement:&lt;/strong&gt; The placement of specific actors and tasks on
+different machines can be specified by using Ray’s support for arbitrary
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/resources.html&quot;&gt;resource requirements&lt;/a&gt;. For example, if the worker requires a GPU, then its
+remote decorator can be declared with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;@ray.remote(num_gpus=1)&lt;/code&gt;. Arbitrary
+custom resources can be defined as well.&lt;/p&gt;
+
+&lt;h2 id=&quot;unifying-tasks-and-actors&quot;&gt;Unifying Tasks and Actors&lt;/h2&gt;
+
+&lt;p&gt;Ray supports parameter server applications efficiently in large part due to its
+unified task-parallel and actor abstraction.&lt;/p&gt;
+
+&lt;p&gt;Popular data processing systems such as &lt;a href=&quot;http://spark.apache.org&quot;&gt;Apache Spark&lt;/a&gt; allow stateless tasks
+(functions with no side effects) to operate on immutable data. This assumption
+simplifies the overall system design and makes it easier for applications to
+reason about correctness.&lt;/p&gt;
+
+&lt;p&gt;However, mutable state that is shared between many tasks is a recurring theme in
+machine learning applications. That state could be the weights of a neural
+network, the state of a third-party simulator, or an encapsulation of an
+interaction with the physical world.&lt;/p&gt;
+
+&lt;p&gt;To support these kinds of applications, Ray introduces an actor abstraction. An
+actor will execute methods serially (so there are no concurrency issues), and
+each method can arbitrarily mutate the actor’s internal state. Methods can be
+invoked by other actors and tasks (and even by other applications on the same
+cluster).&lt;/p&gt;
+
+&lt;p&gt;One thing that makes Ray so powerful is that it &lt;em&gt;unifies the actor abstraction
+with the task-parallel abstraction&lt;/em&gt; inheriting the benefits of both approaches.
+Ray uses an underlying dynamic task graph to implement both actors and stateless
+tasks in the same framework. As a consequence, these two abstractions are
+completely interoperable. Tasks and actors can be created from within other
+tasks and actors. Both return futures, which can be passed into other tasks or
+actor methods to introduce scheduling and data dependencies. As a result, Ray
+applications inherit the best features of both tasks and actors.&lt;/p&gt;
+
+&lt;h2 id=&quot;under-the-hood&quot;&gt;Under the Hood&lt;/h2&gt;
+
+&lt;p&gt;&lt;strong&gt;Dynamic Task Graphs:&lt;/strong&gt; Under the hood, remote function invocations and actor
+method invocations create tasks that are added to a dynamically growing graph of
+tasks. The Ray backend is in charge of scheduling and executing these tasks
+across a cluster (or a single multi-core machine). Tasks can be created by the
+“driver” application or by other tasks.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Data:&lt;/strong&gt; Ray efficiently serializes data using the &lt;a href=&quot;https://ray-project.github.io/2017/10/15/fast-python-serialization-with-ray-and-arrow.html&quot;&gt;Apache Arrow&lt;/a&gt; data
+layout. Objects are shared between workers and actors on the same machine
+through &lt;a href=&quot;https://ray-project.github.io/2017/08/08/plasma-in-memory-object-store.html&quot;&gt;shared memory&lt;/a&gt;, which avoids the need for copies or
+deserialization. This optimization is absolutely critical for achieving good
+performance.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Scheduling:&lt;/strong&gt; Ray uses a distributed scheduling approach. Each machine has its
+own scheduler, which manages the workers and actors on that machine. Tasks are
+submitted by applications and workers to the scheduler on the same machine. From
+there, they can be reassigned to other workers or passed to other local
+schedulers. This allows Ray to achieve substantially higher task throughput than
+what can be achieved with a centralized scheduler, which is important for
+machine learning applications.&lt;/p&gt;
+
+&lt;h2 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+
+&lt;p&gt;A parameter server is normally implemented and shipped as a standalone system.
+The thing that makes this approach so powerful is that we’re able to implement a
+parameter server with a few lines of code as an application. &lt;em&gt;This approach
+makes it much simpler to deploy applications that use parameter servers and to
+modify the behavior of the parameter server.&lt;/em&gt; For example, if we want to shard
+the parameter server, change the update rule, switch between asynchronous and
+synchronous updates, ignore straggler workers, or any number of other
+customizations, we can do each of these things with a few extra lines of code.&lt;/p&gt;
+
+&lt;p&gt;This post describes how to use Ray actors to implement a parameter server.
+However, actors are a much more general concept and can be useful for many
+applications that involve stateful computation. Examples include logging,
+streaming, simulation, model serving, graph processing, and many others.&lt;/p&gt;
+
+&lt;h2 id=&quot;running-this-code&quot;&gt;Running this Code&lt;/h2&gt;
+
+&lt;p&gt;To run the complete application, first install Ray with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;pip install ray&lt;/code&gt;. Then
+you should be able to run the code below, which implements a sharded parameter
+server.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;time&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Start Ray.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;nc&quot;&gt;ParameterServer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;__init__&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dim&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Alternatively, params could be a dictionary mapping keys to arrays.
+&lt;/span&gt;        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;zeros&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dim&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;update_params&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;
+
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;worker&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;# Get the latest parameters.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;parameter_shards&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+          &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;params&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;concatenate&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_shards&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+        &lt;span class=&quot;c1&quot;&gt;# Compute a gradient update. Here we just make a fake
+&lt;/span&gt;        &lt;span class=&quot;c1&quot;&gt;# update, but in practice this would use a library like
+&lt;/span&gt;        &lt;span class=&quot;c1&quot;&gt;# TensorFlow and would also take in a batch of data.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ones&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# This is a fake placeholder for some computation.
+&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;grad_shards&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;split&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+
+        &lt;span class=&quot;c1&quot;&gt;# Send the gradient updates to the parameter servers.
+&lt;/span&gt;        &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;zip&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grad_shards&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;update_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;grad&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+
+&lt;span class=&quot;c1&quot;&gt;# Start two parameter servers, each with half of the parameters.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ParameterServer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Start 2 workers.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;workers&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;worker&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Inspect the parameters at regular intervals.
+&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get_params&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ps&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;parameter_servers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Note that this example focuses on simplicity and that more can be done to
+optimize this code.&lt;/p&gt;
+
+&lt;h2 id=&quot;read-more&quot;&gt;Read More&lt;/h2&gt;
+
+&lt;p&gt;For more information about Ray, take a look at the following links:&lt;/p&gt;
+&lt;ol&gt;
+  &lt;li&gt;The Ray &lt;a href=&quot;http://ray.readthedocs.io/en/latest&quot;&gt;documentation&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;The Ray &lt;a href=&quot;http://ray.readthedocs.io/en/latest/api.html&quot;&gt;API&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;Fast &lt;a href=&quot;https://ray-project.github.io/2017/10/15/fast-python-serialization-with-ray-and-arrow.html&quot;&gt;serialization&lt;/a&gt; with Ray and Apache Arrow&lt;/li&gt;
+  &lt;li&gt;A &lt;a href=&quot;https://arxiv.org/abs/1712.05889&quot;&gt;paper&lt;/a&gt; describing the Ray system&lt;/li&gt;
+  &lt;li&gt;Efficient &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;hyperparameter&lt;/a&gt; tuning with Ray&lt;/li&gt;
+  &lt;li&gt;Scalable &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;reinforcement&lt;/a&gt; learning with Ray and &lt;a href=&quot;https://arxiv.org/abs/1712.09381&quot;&gt;the RLlib paper&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;Speeding up &lt;a href=&quot;https://github.com/modin-project/modin&quot;&gt;Pandas&lt;/a&gt; with Ray&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Questions should be directed to &lt;em&gt;ray-dev@googlegroups.com&lt;/em&gt;.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post describes how to implement a parameter server in Ray.</summary></entry><entry><title type="html">Ray: 0.5 Release</title><link href="/2018/07/06/ray-0.5-release.html" rel="alternate" type="text/html" title="Ray: 0.5 Release" /><published>2018-07-06T14:00:00+00:00</published><updated>2018-07-06T14:00:00+00:00</updated><id>/2018/07/06/ray-0.5-release</id><content type="html" xml:base="/2018/07/06/ray-0.5-release.html">&lt;p&gt;We are pleased to announce the 0.5 release of &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt;. To upgrade to the latest
+version, run&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;pip install -U ray
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;refactoring&quot;&gt;Refactoring&lt;/h2&gt;
+
+&lt;p&gt;One primary development is a substantial refactoring of the backend, which is
+currently off by default, but can be turned on by starting Ray with the
+environment variable &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;RAY_USE_XRAY=1&lt;/code&gt;. This will be turned on soon after more
+testing and development and will be on by default in the next release. Some
+highlights of the refactor include the following:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;Merging the “local scheduler” and the “plasma manager” into a single “raylet”
+process (consisting of a “node manager” and an “object manager”).&lt;/li&gt;
+  &lt;li&gt;Faster object transfers by using multiple threads to send objects in chunks.&lt;/li&gt;
+  &lt;li&gt;The introduction of a “lineage cache” to improve latency by removing the
+global control store from the scheduling critical path.&lt;/li&gt;
+  &lt;li&gt;The removal of the global scheduler (which is replaced by direct node-manager
+to node-manager communication)&lt;/li&gt;
+  &lt;li&gt;Providing a standardized table-based interface to the Redis-backed global
+control store.&lt;/li&gt;
+  &lt;li&gt;A preliminary approach for automatically flushing global control store
+metadata to avoid out-of-memory errors for long-running jobs.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Note that the refactoring is currently under development and does not yet
+support fault tolerance.&lt;/p&gt;
+
+&lt;h2 id=&quot;rllib-improvements&quot;&gt;RLlib Improvements&lt;/h2&gt;
+
+&lt;p&gt;A number of improvements have been made to &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;RLlib&lt;/a&gt;:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;Added DDPG &lt;a href=&quot;https://github.com/ray-project/ray/pull/1877&quot;&gt;[1877]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Added a policy server example &lt;a href=&quot;https://github.com/ray-project/ray/pull/2232&quot;&gt;[2232]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Multi-agent support &lt;a href=&quot;https://github.com/ray-project/ray/pull/2286&quot;&gt;[2286]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Modular policy graphs &lt;a href=&quot;https://github.com/ray-project/ray/pull/2294&quot;&gt;[2294]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;RNN support &lt;a href=&quot;https://github.com/ray-project/ray/pull/2299&quot;&gt;[2299]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Vectorized environments &lt;a href=&quot;https://github.com/ray-project/ray/pull/2170&quot;&gt;[2170]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Many bug fixes.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;tune&quot;&gt;Tune&lt;/h2&gt;
+
+&lt;p&gt;A number of improvements have been made to &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;Tune&lt;/a&gt;:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;HyperOpt integration &lt;a href=&quot;https://github.com/ray-project/ray/pull/1763&quot;&gt;[1763]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Many bug fixes and improvements.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;pandas-on-ray&quot;&gt;Pandas on Ray&lt;/h2&gt;
+
+&lt;p&gt;Pandas on Ray has moved to the &lt;a href=&quot;https://github.com/modin-project/modin&quot;&gt;Modin&lt;/a&gt; project and will continue to be
+developed there.&lt;/p&gt;
+
+&lt;h2 id=&quot;autoscaler&quot;&gt;Autoscaler&lt;/h2&gt;
+
+&lt;p&gt;The &lt;a href=&quot;http://ray.readthedocs.io/en/latest/autoscaling.html&quot;&gt;autoscaler&lt;/a&gt; has grown more mature and now supports Google Cloud
+Platform:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;Support for GCP &lt;a href=&quot;https://github.com/ray-project/ray/pull/2061&quot;&gt;[2061]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Many bug fixes and additional features.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;java&quot;&gt;Java&lt;/h2&gt;
+
+&lt;p&gt;Ray now supports Java thanks to contributions from &lt;a href=&quot;https://www.antfin.com/&quot;&gt;Ant Financial&lt;/a&gt;:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;Support for Java (e.g., &lt;a href=&quot;https://github.com/ray-project/ray/pull/2092&quot;&gt;[2092]&lt;/a&gt; &lt;a href=&quot;https://github.com/ray-project/ray/pull/2094&quot;&gt;[2094]&lt;/a&gt; &lt;a href=&quot;https://github.com/ray-project/ray/pull/2151&quot;&gt;[2151]&lt;/a&gt; &lt;a href=&quot;https://github.com/ray-project/ray/pull/2171&quot;&gt;[2171]&lt;/a&gt; &lt;a href=&quot;https://github.com/ray-project/ray/pull/2225&quot;&gt;[2225]&lt;/a&gt; &lt;a href=&quot;https://github.com/ray-project/ray/pull/2245&quot;&gt;[2245]&lt;/a&gt;).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;other-features&quot;&gt;Other Features&lt;/h2&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;A named actors prototype &lt;a href=&quot;https://github.com/ray-project/ray/pull/2129&quot;&gt;[2129]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Usage of airspeed velocity for regression testing &lt;a href=&quot;https://github.com/ray-project/ray/pull/2113&quot;&gt;[2113]&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;More efficient serialization of numpy arrays &lt;a href=&quot;https://github.com/ray-project/ray/pull/1889&quot;&gt;[1889]&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;</content><author><name></name></author><summary type="html">This post announces the release of Ray 0.5.</summary></entry><entry><title type="html">Ray: 0.4 Release</title><link href="/2018/03/27/ray-0.4-release.html" rel="alternate" type="text/html" title="Ray: 0.4 Release" /><published>2018-03-27T14:00:00+00:00</published><updated>2018-03-27T14:00:00+00:00</updated><id>/2018/03/27/ray-0.4-release</id><content type="html" xml:base="/2018/03/27/ray-0.4-release.html">&lt;p&gt;We are pleased to announce the 0.4 release of &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt;. This release introduces
+improvements to Ray’s scheduling, substantial backend improvements, and the
+start of &lt;a href=&quot;https://rise.cs.berkeley.edu/blog/pandas-on-ray/&quot;&gt;Pandas on Ray&lt;/a&gt;, as well as many improvements to &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;RLlib&lt;/a&gt; and
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;Tune&lt;/a&gt; (you can read more about the improvements in RLlib in &lt;a href=&quot;https://rise.cs.berkeley.edu/blog/distributed-policy-optimizers-for-scalable-and-reproducible-deep-rl/&quot;&gt;this blog
+post&lt;/a&gt;).&lt;/p&gt;
+
+&lt;p&gt;To upgrade to the latest version, run&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;pip install -U ray
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;scheduling&quot;&gt;Scheduling&lt;/h2&gt;
+
+&lt;p&gt;This release includes two major changes to the scheduling behavior: spillback
+scheduling and support for custom resources.&lt;/p&gt;
+
+&lt;h3 id=&quot;spillback-scheduling&quot;&gt;Spillback Scheduling&lt;/h3&gt;
+
+&lt;p&gt;Because Ray takes a bottom-up hierarchical approach to scheduling in which
+scheduling decisions are made by local schedulers on each machine (in order to
+avoid a centralized scheduling bottleneck), scheduling decisions are often made
+with a slightly stale view of the system state. As a consequence, it is possible
+for race conditions to occur and for too many tasks to be assigned to a single
+machine. For example, consider the case in which there are 100 GPUs scattered
+around the cluster and workers on the various machines submit a total of exactly
+100 GPU tasks. If these tasks take a while to execute, then the desired behavior
+is for one task to be assigned to each GPU. However, without a single scheduling
+bottleneck like a centralized scheduler, too many tasks may be assigned to a
+single machine resulting in delays.&lt;/p&gt;
+
+&lt;p&gt;Spillback scheduling provides a mechanism for correcting for bad scheduling
+decisions. At a high-level, if a local scheduler decides that it does not want
+to execute a task, it can spill the task back to the global scheduler (or in
+principle to another local scheduler). This mechanism allows us to achieve
+perfect load balancing along with high task throughput.&lt;/p&gt;
+
+&lt;h3 id=&quot;custom-resources&quot;&gt;Custom Resources&lt;/h3&gt;
+
+&lt;p&gt;Remote functions and actors now support scheduling with &lt;a href=&quot;http://ray.readthedocs.io/en/latest/resources.html&quot;&gt;arbitrary custom
+resource requirements&lt;/a&gt;. We can specify that a remote function requires 1 CPU, 2
+GPUs, and 3 of some custom resource with syntax like the following.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;num_cpus&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;num_gpus&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;resources&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'Custom'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;pass&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;To tell Ray that a node has 6 of the custom resource, Ray should be started on
+that machine with a command like the following.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;ray start ... --resources='{&quot;Custom&quot;: 6}'
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Custom resources can be used for a variety of different purposes. For example,
+the can be used to do bookkeeping of a concrete resource like memory, or to
+indicate that a particular dataset lives on a particular machine, or to give
+machines certain roles (such as a “parameter server” machine or a “worker”
+machine).&lt;/p&gt;
+
+&lt;h2 id=&quot;libraries&quot;&gt;Libraries&lt;/h2&gt;
+
+&lt;p&gt;This release also includes the start of &lt;a href=&quot;https://rise.cs.berkeley.edu/blog/pandas-on-ray/&quot;&gt;Pandas on Ray&lt;/a&gt;, which is a project
+aimed at speeding up &lt;a href=&quot;https://pandas.pydata.org/&quot;&gt;Pandas&lt;/a&gt; DataFrames. It also includes substantial
+improvements to &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;RLlib&lt;/a&gt;, such as high-quality implementations of algorithms
+like &lt;a href=&quot;https://arxiv.org/abs/1803.00933&quot;&gt;Ape-X&lt;/a&gt;, and substantial improvements to &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;Tune&lt;/a&gt;, such as
+implementations of state of the art algorithms like &lt;a href=&quot;http://ray.readthedocs.io/en/latest/pbt.html&quot;&gt;Population Based
+Training&lt;/a&gt;.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post announces the release of Ray 0.4.</summary></entry><entry><title type="html">Ray: 0.3 Release</title><link href="/2017/11/30/ray-0.3-release.html" rel="alternate" type="text/html" title="Ray: 0.3 Release" /><published>2017-11-30T14:00:00+00:00</published><updated>2017-11-30T14:00:00+00:00</updated><id>/2017/11/30/ray-0.3-release</id><content type="html" xml:base="/2017/11/30/ray-0.3-release.html">&lt;p&gt;We are pleased to announce the Ray 0.3 release. This release introduces
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/actors.html#passing-around-actor-handles-experimental&quot;&gt;&lt;strong&gt;distributed actor handles&lt;/strong&gt;&lt;/a&gt; and &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;&lt;strong&gt;Ray.tune&lt;/strong&gt;&lt;/a&gt; — a new
+hyperparameter search library. It also includes a number of bug fixes and
+stability enhancements.&lt;/p&gt;
+
+&lt;p&gt;To upgrade to the latest version, run&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;pip install -U ray
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;hyperparameter-search-tool&quot;&gt;Hyperparameter Search Tool&lt;/h2&gt;
+
+&lt;p&gt;This release adds &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;&lt;strong&gt;Ray.tune&lt;/strong&gt;&lt;/a&gt;, a distributed hyperparameter evaluation
+tool for long-running tasks such as reinforcement learning and deep learning
+training. It currently includes the following features:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Pluggable &lt;strong&gt;early stopping algorithms&lt;/strong&gt; including the Median Stopping Rule and
+&lt;a href=&quot;https://arxiv.org/abs/1603.06560&quot;&gt;Hyperband&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Integration with &lt;strong&gt;visualization tools&lt;/strong&gt; such as &lt;a href=&quot;https://www.tensorflow.org/get_started/summaries_and_tensorboard&quot;&gt;TensorBoard&lt;/a&gt;,
+&lt;a href=&quot;https://media.readthedocs.org/pdf/rllab/latest/rllab.pdf&quot;&gt;rllab’s VisKit&lt;/a&gt;, and a &lt;a href=&quot;https://en.wikipedia.org/wiki/Parallel_coordinates&quot;&gt;parallel coordinates visualization&lt;/a&gt;.&lt;/li&gt;
+  &lt;li&gt;Flexible &lt;strong&gt;trial variant generation&lt;/strong&gt;, including grid search, random search,
+and conditional parameter distributions.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Resource-aware scheduling&lt;/strong&gt;, including support for concurrent runs of
+algorithms that require GPUs or are themselves parallel and distributed.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Ray.tune provides a Python API for use with deep learning and other compute
+intensive training tasks. Here is a toy example illustrating usage.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray.tune&lt;/span&gt; &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;register_trainable&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grid_search&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;run_experiments&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;my_func&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;config&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;reporter&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;reporter&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;timesteps_total&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;mean_accuracy&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;**&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;config&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'alpha'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+
+        &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;config&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'beta'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.01&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;register_trainable&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'my_func'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;my_func&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;run_experiments&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;({&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;'my_experiment'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+        &lt;span class=&quot;s&quot;&gt;'run'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'my_func'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;s&quot;&gt;'resources'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'cpu'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'gpu'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;},&lt;/span&gt;
+        &lt;span class=&quot;s&quot;&gt;'stop'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'mean_accuracy'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;},&lt;/span&gt;
+        &lt;span class=&quot;s&quot;&gt;'config'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+            &lt;span class=&quot;s&quot;&gt;'alpha'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grid_search&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.6&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]),&lt;/span&gt;
+            &lt;span class=&quot;s&quot;&gt;'beta'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;grid_search&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]),&lt;/span&gt;
+        &lt;span class=&quot;p&quot;&gt;},&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;In-progress results can be visualized live using tools such as Tensorboard and
+rllab’s VisKit (or you can read the JSON format logs directly from the driver
+node):&lt;/p&gt;
+
+&lt;p&gt;View the &lt;a href=&quot;http://ray.readthedocs.io/en/latest/tune.html&quot;&gt;documentation&lt;/a&gt; and the &lt;a href=&quot;https://github.com/ray-project/ray/tree/master/python/ray/tune&quot;&gt;code&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3 id=&quot;raytune-integration-with-rllib&quot;&gt;Ray.tune integration with RLlib&lt;/h3&gt;
+
+&lt;p&gt;You can try out RLlib with Ray.tune with the following example.&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nb&quot;&gt;cd &lt;/span&gt;ray/python/ray/rllib
+python train.py &lt;span class=&quot;nt&quot;&gt;-f&lt;/span&gt; tuned_examples/cartpole-grid-search-example.yaml
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tuned_examples&lt;/code&gt; directory also contains pre-tuned hyperparameter
+configurations for common benchmark tasks such as Pong and Humanoid. View the
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;RLlib documentation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3 id=&quot;initial-support-for-pytorch-in-rllib&quot;&gt;Initial Support for PyTorch in RLlib&lt;/h3&gt;
+
+&lt;p&gt;A modern reinforcement learning library should work with multiple deep learning
+frameworks. As a step toward this goal, 0.3 adds support for PyTorch models for
+A3C in RLlib. You can try this out with the following A3C config.&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nb&quot;&gt;cd &lt;/span&gt;ray/python/ray/rllib
+./train.py &lt;span class=&quot;nt&quot;&gt;--run&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;A3C &lt;span class=&quot;se&quot;&gt;\&lt;/span&gt;
+           &lt;span class=&quot;nt&quot;&gt;--env&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;PongDeterministic-v4 &lt;span class=&quot;se&quot;&gt;\&lt;/span&gt;
+           &lt;span class=&quot;nt&quot;&gt;--config&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'{&quot;use_pytorch&quot;: true, &quot;num_workers&quot;: 8, &quot;use_lstm&quot;: false, &quot;model&quot;: {&quot;grayscale&quot;: true, &quot;zero_mean&quot;: false, &quot;dim&quot;: 80, &quot;channel_major&quot;: true}}'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;distributed-actor-handles&quot;&gt;Distributed Actor Handles&lt;/h2&gt;
+
+&lt;p&gt;Ray 0.3 adds support for &lt;a href=&quot;http://ray.readthedocs.io/en/latest/actors.html#passing-around-actor-handles-experimental&quot;&gt;distributed actor handles&lt;/a&gt;, that is, the ability to
+have multiple callers invoke methods on the same actor. The actor’s creator may
+pass the actor handle as an argument to other tasks or to other actor methods.
+Here’s an example in which the driver creates an actor to log messages and
+passes an actor handle to other tasks:&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;nc&quot;&gt;Logger&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;__init__&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logs&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;log&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;log_msg&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logs&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;append&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;log_msg&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;read_logs&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logs&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;task&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logger&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;task_index&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;# Do some work.
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;logged&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;logger&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;log&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'Task {} is done'&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;format&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;task_index&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Create an actor and get a handle to it.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logger&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;Logger&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;# Pass the actor handle to some tasks.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tasks&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;task&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logger&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;# Wait for the tasks to finish.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tasks&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;# Get the logs from the tasks.
+&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;logger&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read_logs&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This feature is still considered experimental, but we’ve already found
+distributed actor handles useful for implementing &lt;a href=&quot;http://ray.readthedocs.io/en/latest/example-parameter-server.html&quot;&gt;&lt;strong&gt;parameter server&lt;/strong&gt;&lt;/a&gt; and
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/example-streaming.html&quot;&gt;&lt;strong&gt;streaming MapReduce&lt;/strong&gt;&lt;/a&gt; applications.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post announces the release of Ray 0.3.</summary></entry><entry><title type="html">Fast Python Serialization with Ray and Apache Arrow</title><link href="/2017/10/15/fast-python-serialization-with-ray-and-arrow.html" rel="alternate" type="text/html" title="Fast Python Serialization with Ray and Apache Arrow" /><published>2017-10-15T14:00:00+00:00</published><updated>2017-10-15T14:00:00+00:00</updated><id>/2017/10/15/fast-python-serialization-with-ray-and-arrow</id><content type="html" xml:base="/2017/10/15/fast-python-serialization-with-ray-and-arrow.html">&lt;p&gt;This post elaborates on the integration between &lt;a href=&quot;http://ray.readthedocs.io/en/latest/index.html&quot;&gt;Ray&lt;/a&gt; and &lt;a href=&quot;https://arrow.apache.org/&quot;&gt;Apache Arrow&lt;/a&gt;.
+The main problem this addresses is &lt;a href=&quot;https://en.wikipedia.org/wiki/Serialization&quot;&gt;data serialization&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;From &lt;a href=&quot;https://en.wikipedia.org/wiki/Serialization&quot;&gt;Wikipedia&lt;/a&gt;, &lt;strong&gt;serialization&lt;/strong&gt; is&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;… the process of translating data structures or object state into a format
+that can be stored … or transmitted … and reconstructed later (possibly
+in a different computer environment).&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Why is any translation necessary? Well, when you create a Python object, it may
+have pointers to other Python objects, and these objects are all allocated in
+different regions of memory, and all of this has to make sense when unpacked by
+another process on another machine.&lt;/p&gt;
+
+&lt;p&gt;Serialization and deserialization are &lt;strong&gt;bottlenecks in parallel and distributed
+computing&lt;/strong&gt;, especially in machine learning applications with large objects and
+large quantities of data.&lt;/p&gt;
+
+&lt;h2 id=&quot;design-goals&quot;&gt;Design Goals&lt;/h2&gt;
+
+&lt;p&gt;As Ray is optimized for machine learning and AI applications, we have focused a
+lot on serialization and data handling, with the following design goals:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;It should be very efficient with &lt;strong&gt;large numerical data&lt;/strong&gt; (this includes
+NumPy arrays and Pandas DataFrames, as well as objects that recursively contain
+Numpy arrays and Pandas DataFrames).&lt;/li&gt;
+  &lt;li&gt;It should be about as fast as Pickle for &lt;strong&gt;general Python types&lt;/strong&gt;.&lt;/li&gt;
+  &lt;li&gt;It should be compatible with &lt;strong&gt;shared memory&lt;/strong&gt;, allowing multiple processes
+to use the same data without copying it.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Deserialization&lt;/strong&gt; should be extremely fast (when possible, it should not
+require reading the entire serialized object).&lt;/li&gt;
+  &lt;li&gt;It should be &lt;strong&gt;language independent&lt;/strong&gt; (eventually we’d like to enable Python
+workers to use objects created by workers in Java or other languages and vice
+versa).&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;our-approach-and-alternatives&quot;&gt;Our Approach and Alternatives&lt;/h2&gt;
+
+&lt;p&gt;The go-to serialization approach in Python is the &lt;strong&gt;pickle&lt;/strong&gt; module. Pickle is
+very general, especially if you use variants like &lt;a href=&quot;https://github.com/cloudpipe/cloudpickle/&quot;&gt;cloudpickle&lt;/a&gt;. However, it
+does not satisfy requirements 1, 3, 4, or 5. Alternatives like &lt;strong&gt;json&lt;/strong&gt; satisfy
+5, but not 1-4.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Our Approach:&lt;/strong&gt; To satisfy requirements 1-5, we chose to use the
+&lt;a href=&quot;https://arrow.apache.org/&quot;&gt;Apache Arrow&lt;/a&gt; format as our underlying data representation. In collaboration
+with the Apache Arrow team, we built &lt;a href=&quot;https://arrow.apache.org/docs/python/ipc.html#arbitrary-object-serialization&quot;&gt;libraries&lt;/a&gt; for mapping general Python
+objects to and from the Arrow format. Some properties of this approach:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;The data layout is language independent (requirement 5).&lt;/li&gt;
+  &lt;li&gt;Offsets into a serialized data blob can be computed in constant time without
+reading the full object (requirements 1 and 4).&lt;/li&gt;
+  &lt;li&gt;Arrow supports &lt;strong&gt;zero-copy reads&lt;/strong&gt;, so objects can naturally be stored in
+shared memory and used by multiple processes (requirements 1 and 3).&lt;/li&gt;
+  &lt;li&gt;We can naturally fall back to pickle for anything we can’t handle well
+(requirement 2).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;Alternatives to Arrow:&lt;/strong&gt; We could have built on top of
+&lt;a href=&quot;https://developers.google.com/protocol-buffers/&quot;&gt;&lt;strong&gt;Protocol Buffers&lt;/strong&gt;&lt;/a&gt;, but protocol buffers really isn’t designed for
+numerical data, and that approach wouldn’t satisfy 1, 3, or 4. Building on top
+of &lt;a href=&quot;https://google.github.io/flatbuffers/&quot;&gt;&lt;strong&gt;Flatbuffers&lt;/strong&gt;&lt;/a&gt; actually could be made to work, but it would have
+required implementing a lot of the facilities that Arrow already has and we
+preferred a columnar data layout more optimized for big data.&lt;/p&gt;
+
+&lt;h2 id=&quot;speedups&quot;&gt;Speedups&lt;/h2&gt;
+
+&lt;p&gt;Here we show some performance improvements over Python’s pickle module. The
+experiments were done using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;pickle.HIGHEST_PROTOCOL&lt;/code&gt;. Code for generating these
+plots is included at the end of the post.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;With NumPy arrays:&lt;/strong&gt; In machine learning and AI applications, data (e.g.,
+images, neural network weights, text documents) are typically represented as
+data structures containing NumPy arrays. When using NumPy arrays, the speedups
+are impressive.&lt;/p&gt;
+
+&lt;p&gt;The fact that the Ray bars for deserialization are barely visible is not a
+mistake. This is a consequence of the support for zero-copy reads (the savings
+largely come from the lack of memory movement).&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/speedups0.png&quot; width=&quot;365&quot; height=&quot;255&quot; /&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/speedups1.png&quot; width=&quot;365&quot; height=&quot;255&quot; /&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Note that the biggest wins are with deserialization. The speedups here are
+multiple orders of magnitude and get better as the NumPy arrays get larger
+(thanks to design goals 1, 3, and 4). Making &lt;strong&gt;deserialization&lt;/strong&gt; fast is
+important for two reasons. First, an object may be serialized once and then
+deserialized many times (e.g., an object that is broadcast to all workers).
+Second, a common pattern is for many objects to be serialized in parallel and
+then aggregated and deserialized one at a time on a single worker making
+deserialization the bottleneck.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Without NumPy arrays:&lt;/strong&gt; When using regular Python objects, for which we
+cannot take advantage of shared memory, the results are comparable to pickle.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/speedups2.png&quot; width=&quot;365&quot; height=&quot;255&quot; /&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/speedups3.png&quot; width=&quot;365&quot; height=&quot;255&quot; /&gt;
+&lt;/div&gt;
+
+&lt;p&gt;These are just a few examples of interesting Python objects. The most important
+case is the case where NumPy arrays are nested within other objects. Note that
+our serialization library works with very general Python types including custom
+Python classes and deeply nested objects.&lt;/p&gt;
+
+&lt;h2 id=&quot;the-api&quot;&gt;The API&lt;/h2&gt;
+
+&lt;p&gt;The serialization library can be used directly through pyarrow as follows. More
+documentation is available &lt;a href=&quot;https://arrow.apache.org/docs/python/ipc.html#arbitrary-object-serialization&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'hello'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;5.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;6.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])]&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;serialized_x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;to_buffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;deserialized_x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;deserialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialized_x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;It can be used directly through the Ray API as follows.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'hello'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;5.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;6.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])]&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;x_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;put&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;deserialized_x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;data-representation&quot;&gt;Data Representation&lt;/h2&gt;
+
+&lt;p&gt;We use Apache Arrow as the underlying language-independent data layout. Objects
+are stored in two parts: a &lt;strong&gt;schema&lt;/strong&gt; and a &lt;strong&gt;data blob&lt;/strong&gt;. At a high level, the
+data blob is roughly a flattened concatenation of all of the data values
+recursively contained in the object, and the schema defines the types and
+nesting structure of the data blob.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Technical Details:&lt;/strong&gt; Python sequences (e.g., dictionaries, lists, tuples,
+sets) are encoded as Arrow &lt;a href=&quot;http://arrow.apache.org/docs/memory_layout.html#dense-union-type&quot;&gt;UnionArrays&lt;/a&gt; of other types (e.g., bools, ints,
+strings, bytes, floats, doubles, date64s, tensors (i.e., NumPy arrays), lists,
+tuples, dicts and sets). Nested sequences are encoded using Arrow
+&lt;a href=&quot;http://arrow.apache.org/docs/memory_layout.html#list-type&quot;&gt;ListArrays&lt;/a&gt;. All tensors are collected and appended to the end of the
+serialized object, and the UnionArray contains references to these tensors.&lt;/p&gt;
+
+&lt;p&gt;To give a concrete example, consider the following object.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;p&quot;&gt;[(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'hello'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;5.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;6.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;It would be represented in Arrow with the following structure.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;UnionArray(type_ids=[tuple, string, int, int, ndarray],
+           tuples=ListArray(offsets=[0, 2],
+                            UnionArray(type_ids=[int, int],
+                                       ints=[1, 2])),
+           strings=['hello'],
+           ints=[3, 4],
+           ndarrays=[&amp;lt;offset of numpy array&amp;gt;])
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Arrow uses Flatbuffers to encode serialized schemas. &lt;strong&gt;Using only the schema, we
+can compute the offsets of each value in the data blob without scanning through
+the data blob&lt;/strong&gt; (unlike Pickle, this is what enables fast deserialization). This
+means that we can avoid copying or otherwise converting large arrays and other
+values during deserialization. Tensors are appended at the end of the UnionArray
+and can be efficiently shared and accessed using shared memory.&lt;/p&gt;
+
+&lt;p&gt;Note that the actual object would be laid out in memory as shown below.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/python_object.png&quot; width=&quot;600&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;The layout of a Python object in the heap. Each box is allocated in a
+different memory region, and arrows between boxes represent pointers.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;p&gt;The Arrow serialized representation would be as follows.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/fast_python_serialization_with_ray_and_arrow/arrow_object.png&quot; width=&quot;400&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;The memory layout of the Arrow-serialized object.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;h2 id=&quot;getting-involved&quot;&gt;Getting Involved&lt;/h2&gt;
+
+&lt;p&gt;We welcome contributions, especially in the following areas.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Use the C++ and Java implementations of Arrow to implement versions of this
+for C++ and Java.&lt;/li&gt;
+  &lt;li&gt;Implement support for more Python types and better test coverage.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;reproducing-the-figures-above&quot;&gt;Reproducing the Figures Above&lt;/h2&gt;
+
+&lt;p&gt;For reference, the figures can be reproduced with the following code.
+Benchmarking &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.put&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt; instead of &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;pyarrow.serialize&lt;/code&gt; and
+&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;pyarrow.deserialize&lt;/code&gt; gives similar figures. The plots were generated at this
+&lt;a href=&quot;https://github.com/apache/arrow/tree/894f7400977693b4e0e8f4b9845fd89481f6bf29&quot;&gt;commit&lt;/a&gt;.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;pickle&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;pyarrow&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;matplotlib.pyplot&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;timeit&lt;/span&gt;
+
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;benchmark_object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;# Time serialization and deserialization for pickle.
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;pickle_serialize&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;lambda&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dumps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;protocol&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;HIGHEST_PROTOCOL&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;serialized_obj&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dumps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;HIGHEST_PROTOCOL&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;pickle_deserialize&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;lambda&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;loads&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialized_obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt;
+                                       &lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;c1&quot;&gt;# Time serialization and deserialization for Ray.
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;ray_serialize&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;lambda&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;to_buffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;serialized_obj&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;to_buffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;ray_deserialize&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;timeit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;lambda&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;deserialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serialized_obj&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pickle_serialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle_deserialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt;
+            &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray_serialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray_deserialize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]]&lt;/span&gt;
+
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;plot&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pickle_times&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray_times&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;title&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fig&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ax&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;subplots&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fig&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;set_size_inches&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;3.8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;2.7&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;n&quot;&gt;bar_width&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.35&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;index&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;arange&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;opacity&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.6&lt;/span&gt;
+
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;bar&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;index&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle_times&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bar_width&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;alpha&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;opacity&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;color&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'r'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;label&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'Pickle'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;bar&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;index&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bar_width&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray_times&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bar_width&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;alpha&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;opacity&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;color&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'c'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;label&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'Ray'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;title&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;title&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fontweight&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'bold'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ylabel&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'Time (seconds)'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fontsize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;labels&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'serialization'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'deserialization'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;xticks&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;index&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bar_width&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;/&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;labels&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fontsize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;legend&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fontsize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bbox_to_anchor&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tight_layout&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;yticks&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fontsize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;savefig&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'plot-'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'.png'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;format&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'png'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+
+&lt;span class=&quot;n&quot;&gt;test_objects&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;randn&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;50000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)],&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'weight-'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;randn&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;50000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)},&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;set&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'string1'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'string2'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)])&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)},&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;200000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;titles&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;'List of large numpy arrays'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;'Dictionary of large numpy arrays'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;'Large dictionary of small sets'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;'Large list of strings'&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;test_objects&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;plot&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;benchmark_object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;test_objects&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;titles&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;</content><author><name>Philipp Moritz, Robert Nishihara</name></author><summary type="html">This post describes how serialization works in Ray.</summary></entry><entry><title type="html">Ray: 0.2 Release</title><link href="/2017/09/30/ray-0.2-release.html" rel="alternate" type="text/html" title="Ray: 0.2 Release" /><published>2017-09-30T14:00:00+00:00</published><updated>2017-09-30T14:00:00+00:00</updated><id>/2017/09/30/ray-0.2-release</id><content type="html" xml:base="/2017/09/30/ray-0.2-release.html">&lt;p&gt;We are pleased to announce the Ray 0.2 release. This release includes the
+following:&lt;/p&gt;
+&lt;ul&gt;
+  &lt;li&gt;substantial &lt;a href=&quot;http://ray.readthedocs.io/en/latest/plasma-object-store.html&quot;&gt;performance improvements to the Plasma object store&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;an initial &lt;a href=&quot;http://ray.readthedocs.io/en/latest/webui.html&quot;&gt;Jupyter notebook based web UI&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;the start of a &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;scalable reinforcement learning library&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;http://ray.readthedocs.io/en/latest/fault-tolerance.html&quot;&gt;fault tolerance for actors&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2 id=&quot;plasma&quot;&gt;Plasma&lt;/h2&gt;
+
+&lt;p&gt;Since the last release, the Plasma object store has moved out of the Ray
+codebase and is &lt;strong&gt;now being developed as part of &lt;a href=&quot;https://github.com/apache/arrow&quot;&gt;Apache Arrow&lt;/a&gt;&lt;/strong&gt; (see the
+&lt;a href=&quot;https://arrow.apache.org/docs/python/plasma.html&quot;&gt;relevant documentation&lt;/a&gt;), so that it can be used as a standalone component
+by other projects to leverage high-performance shared memory. In addition, our
+Arrow-based serialization libraries have been moved into pyarrow (see the
+&lt;a href=&quot;https://arrow.apache.org/docs/python/ipc.html#arbitrary-object-serialization&quot;&gt;relevant documentation&lt;/a&gt;).&lt;/p&gt;
+
+&lt;p&gt;In 0.2, we’ve increased the write throughput of the object store to around
+15GB/s for large objects (when writing from a single client). Achieving this
+performance requires enabling huge pages (to minimize the number of TLB cache
+misses). Instructions for doing so are &lt;a href=&quot;http://ray.readthedocs.io/en/latest/plasma-object-store.html&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The speed at which objects can be written into the object store is a key
+performance metric. For example, it is the bottleneck for &lt;a href=&quot;http://ray.readthedocs.io/en/latest/example-a3c.html&quot;&gt;A3C&lt;/a&gt; and many
+other algorithms.&lt;/p&gt;
+
+&lt;p&gt;You can benchmark write throughput as follows.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ones&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;**&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;9&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dtype&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;uint8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Measure the time required to write 1GB to the Plasma store.
+&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;%&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;time&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;put&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;web-ui&quot;&gt;Web UI&lt;/h2&gt;
+
+&lt;p&gt;We’ve built an initial Jupyter-notebook-based web UI for understanding and
+debugging application performance. See the &lt;a href=&quot;http://ray.readthedocs.io/en/latest/webui.html&quot;&gt;instructions for using the UI&lt;/a&gt;.
+The UI includes a task timeline visualization based on Chrome tracing to see
+where tasks were scheduled, how long they took, and what the dependencies
+between the tasks were. An example visualization is shown below.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/ray_0.2_release/timeline_visualization.png&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;A visualization of the task timeline. Boxes indicate tasks and arrows
+indicate data dependencies between tasks.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;p&gt;This type of visualization can immediately expose problems with performance,
+scheduling, and load balancing.&lt;/p&gt;
+
+&lt;p&gt;The above visualization can be generated on a single machine by the following
+script.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;ray&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;time&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.001&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;g&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ys&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;ys&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;g&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ys&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;rllib&quot;&gt;RLlib&lt;/h2&gt;
+
+&lt;p&gt;We’ve begun implementing a &lt;a href=&quot;http://ray.readthedocs.io/en/latest/rllib.html&quot;&gt;scalable reinforcement learning library&lt;/a&gt; based on
+Ray. So far it includes implementations of the following algorithms.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Proximal policy optimization (PPO)&lt;/li&gt;
+  &lt;li&gt;Deep Q-learning (DQN)&lt;/li&gt;
+  &lt;li&gt;Asynchronous advantage actor critic (A3C)&lt;/li&gt;
+  &lt;li&gt;Evolution Strategies (ES)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The DQN, A3C, and ES implementations are based on the &lt;a href=&quot;https://github.com/openai/baselines&quot;&gt;OpenAI baselines&lt;/a&gt;.
+Example code for training is available and can be used as follows.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;# On a single machine.
+python ray/python/ray/rllib/train.py --alg=PPO \
+                                     --env=CartPole-v0
+
+# On a cluster.
+python ray/python/ray/rllib/train.py --alg=PPO \
+                                     --env=CartPole-v0 \
+                                     --redis-address=&amp;lt;head-node-ip&amp;gt;:6379
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This uses &lt;a href=&quot;https://arxiv.org/abs/1707.06347&quot;&gt;proximal policy optimization&lt;/a&gt; to train a policy to control an
+agent in the CartPole environment.&lt;/p&gt;
+
+&lt;p&gt;Running this (on the Humanoid-v1 environment to train a walking humanoid robot)
+on AWS with a cluster of fifteen m4.16xlarge instances and one p2.16xlarge
+instance, we achieve a reward of over 6000 in around 35 minutes. The rollouts
+are parallelized over 512 physical cores and the policy optimization is
+parallelized over 6 GPUs. Relevant hyperparameters for this experiment are
+&lt;a href=&quot;https://github.com/ray-project/ray/blob/b020e6bf1fb00d0745371d8674146d4a5b75d9f0/python/ray/rllib/test/tuned_examples.sh#L11&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;This RL library is under development, and we are looking for contributions
+including implementations of more algorithms.&lt;/p&gt;
+
+&lt;h2 id=&quot;actor-fault-tolerance&quot;&gt;Actor fault tolerance&lt;/h2&gt;
+
+&lt;p&gt;We’ve enabled fault tolerance for actors as follows. If a machine fails, the
+actors that were running on that machine are recreated on other machines, and
+the tasks that previously executed on those actors are replayed to recreate the
+state of the actor. We are working on improving the speed of recovery by
+enabling actor state to be restored from checkpoints. See &lt;a href=&quot;http://ray.readthedocs.io/en/latest/fault-tolerance.html&quot;&gt;an overview of fault
+tolerance in Ray&lt;/a&gt;.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post announces the release of Ray 0.2.</summary></entry><entry><title type="html">The Plasma In-Memory Object Store</title><link href="/2017/08/08/plasma-in-memory-object-store.html" rel="alternate" type="text/html" title="The Plasma In-Memory Object Store" /><published>2017-08-08T00:00:00+00:00</published><updated>2017-08-08T00:00:00+00:00</updated><id>/2017/08/08/plasma-in-memory-object-store</id><content type="html" xml:base="/2017/08/08/plasma-in-memory-object-store.html">&lt;p&gt;&lt;em&gt;This was originally posted on the &lt;a href=&quot;http://arrow.apache.org/blog/2017/08/08/plasma-in-memory-object-store/&quot;&gt;Apache Arrow blog&lt;/a&gt;&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;This blog post presents Plasma, an in-memory object store that is being
+developed as part of Apache Arrow. &lt;strong&gt;Plasma holds immutable objects in shared
+memory so that they can be accessed efficiently by many clients across process
+boundaries.&lt;/strong&gt; In light of the trend toward larger and larger multicore machines,
+Plasma enables critical performance optimizations in the big data regime.&lt;/p&gt;
+
+&lt;p&gt;Plasma was initially developed as part of &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt;, and has recently been moved
+to Apache Arrow in the hopes that it will be broadly useful.&lt;/p&gt;
+
+&lt;p&gt;One of the goals of Apache Arrow is to serve as a common data layer enabling
+zero-copy data exchange between multiple frameworks. A key component of this
+vision is the use of off-heap memory management (via Plasma) for storing and
+sharing Arrow-serialized objects between applications.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Expensive serialization and deserialization as well as data copying are a
+common performance bottleneck in distributed computing.&lt;/strong&gt; For example, a
+Python-based execution framework that wishes to distribute computation across
+multiple Python “worker” processes and then aggregate the results in a single
+“driver” process may choose to serialize data using the built-in &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;pickle&lt;/code&gt;
+library. Assuming one Python process per core, each worker process would have to
+copy and deserialize the data, resulting in excessive memory usage. The driver
+process would then have to deserialize results from each of the workers,
+resulting in a bottleneck.&lt;/p&gt;
+
+&lt;p&gt;Using Plasma plus Arrow, the data being operated on would be placed in the
+Plasma store once, and all of the workers would read the data without copying or
+deserializing it (the workers would map the relevant region of memory into their
+own address spaces). The workers would then put the results of their computation
+back into the Plasma store, which the driver could then read and aggregate
+without copying or deserializing the data.&lt;/p&gt;
+
+&lt;h3 id=&quot;the-plasma-api&quot;&gt;The Plasma API:&lt;/h3&gt;
+
+&lt;p&gt;Below we illustrate a subset of the API. The C++ API is documented more fully
+&lt;a href=&quot;https://github.com/apache/arrow/blob/master/cpp/apidoc/tutorials/plasma.md&quot;&gt;here&lt;/a&gt;, and the Python API is documented &lt;a href=&quot;https://github.com/apache/arrow/blob/master/python/doc/source/plasma.rst&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Object IDs:&lt;/strong&gt; Each object is associated with a string of bytes.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Creating an object:&lt;/strong&gt; Objects are stored in Plasma in two stages. First, the
+object store &lt;em&gt;creates&lt;/em&gt; the object by allocating a buffer for it. At this point,
+the client can write to the buffer and construct the object within the allocated
+buffer. When the client is done, the client &lt;em&gt;seals&lt;/em&gt; the buffer making the object
+immutable and making it available to other Plasma clients.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;c1&quot;&gt;# Create an object.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;object_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;plasma&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ObjectID&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;20&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'a'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;object_size&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1000&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;buffer&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;memoryview&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;client&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;create&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;object_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;object_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Write to the buffer.
+&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;nb&quot;&gt;buffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Seal the object making it immutable and available to other clients.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;client&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;seal&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;object_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;Getting an object:&lt;/strong&gt; After an object has been sealed, any client who knows the
+object ID can get the object.&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;c1&quot;&gt;# Get the object from the store. This blocks until the object has been sealed.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;object_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pyarrow&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;plasma&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ObjectID&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;20&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'a'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;buff&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;client&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;object_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;buffer&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;memoryview&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;buff&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;If the object has not been sealed yet, then the call to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;client.get&lt;/code&gt; will block
+until the object has been sealed.&lt;/p&gt;
+
+&lt;h3 id=&quot;a-sorting-application&quot;&gt;A sorting application&lt;/h3&gt;
+
+&lt;p&gt;To illustrate the benefits of Plasma, we demonstrate an &lt;strong&gt;11x speedup&lt;/strong&gt; (on a
+machine with 20 physical cores) for sorting a large pandas DataFrame (one
+billion entries). The baseline is the built-in pandas sort function, which sorts
+the DataFrame in 477 seconds. To leverage multiple cores, we implement the
+following standard distributed sorting scheme.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;We assume that the data is partitioned across K pandas DataFrames and that
+each one already lives in the Plasma store.&lt;/li&gt;
+  &lt;li&gt;We subsample the data, sort the subsampled data, and use the result to define
+L non-overlapping buckets.&lt;/li&gt;
+  &lt;li&gt;For each of the K data partitions and each of the L buckets, we find the
+subset of the data partition that falls in the bucket, and we sort that
+subset.&lt;/li&gt;
+  &lt;li&gt;For each of the L buckets, we gather all of the K sorted subsets that fall in
+that bucket.&lt;/li&gt;
+  &lt;li&gt;For each of the L buckets, we merge the corresponding K sorted subsets.&lt;/li&gt;
+  &lt;li&gt;We turn each bucket into a pandas DataFrame and place it in the Plasma store.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Using this scheme, we can sort the DataFrame (the data starts and ends in the
+Plasma store), in 44 seconds, giving an 11x speedup over the baseline.&lt;/p&gt;
+
+&lt;h3 id=&quot;design&quot;&gt;Design&lt;/h3&gt;
+
+&lt;p&gt;The Plasma store runs as a separate process. It is written in C++ and is
+designed as a single-threaded event loop based on the &lt;a href=&quot;https://redis.io/&quot;&gt;Redis&lt;/a&gt; event loop library.
+The plasma client library can be linked into applications. Clients communicate
+with the Plasma store via messages serialized using &lt;a href=&quot;https://google.github.io/flatbuffers/&quot;&gt;Google Flatbuffers&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3 id=&quot;call-for-contributions&quot;&gt;Call for contributions&lt;/h3&gt;
+
+&lt;p&gt;Plasma is a work in progress, and the API is currently unstable. Today Plasma is
+primarily used in &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;Ray&lt;/a&gt; as an in-memory cache for Arrow serialized objects.
+We are looking for a broader set of use cases to help refine Plasma’s API. In
+addition, we are looking for contributions in a variety of areas including
+improving performance and building other language bindings. Please let us know
+if you are interested in getting involved with the project.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post announces Plasma, an in-memory object store for communicating data between processes.</summary></entry><entry><title type="html">Ray: A Distributed Execution Framework for AI Applications</title><link href="/2017/05/20/announcing-ray.html" rel="alternate" type="text/html" title="Ray: A Distributed Execution Framework for AI Applications" /><published>2017-05-20T14:00:00+00:00</published><updated>2017-05-20T14:00:00+00:00</updated><id>/2017/05/20/announcing-ray</id><content type="html" xml:base="/2017/05/20/announcing-ray.html">&lt;p&gt;This post announces Ray, a framework for efficiently running Python code on
+clusters and large multi-core machines. The project is open source.
+You can check out &lt;a href=&quot;https://github.com/ray-project/ray&quot;&gt;the code&lt;/a&gt; and
+&lt;a href=&quot;http://ray.readthedocs.io/en/latest/?badge=latest&quot;&gt;the documentation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Many AI algorithms are computationally intensive and exhibit complex
+communication patterns. As a result, many researchers spend most of their
+time building custom systems to efficiently distribute their code across
+clusters of machines.&lt;/p&gt;
+
+&lt;p&gt;However, the resulting systems are often specific to a single algorithm or class
+of algorithms. We built Ray to help eliminate a bunch of the redundant
+engineering effort that is currently repeated over and over for each new
+algorithm. Our hope is that a few basic primitives can be reused to implement
+and to efficiently execute a broad range of algorithms and applications.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/07eIebEk1MM?autoplay=1&amp;amp;loop=1&amp;amp;playlist=07eIebEk1MM&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;div&gt;A simulated robot learning to run using Ray.&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;h1 id=&quot;simple-parallelization-of-existing-code&quot;&gt;Simple Parallelization of Existing Code&lt;/h1&gt;
+
+&lt;p&gt;Ray enables Python functions to be executed remotely with minimal modifications.&lt;/p&gt;
+
+&lt;p&gt;With &lt;strong&gt;regular Python&lt;/strong&gt;, when you call a function, the call blocks until the
+function has been executed. This example would take 8 seconds to execute.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Calls to f executed serially.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;result&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;results&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;append&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;result&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;&lt;strong&gt;With Ray&lt;/strong&gt;, when you call a &lt;strong&gt;remote function&lt;/strong&gt;, the call immediately returns
+a future (we will refer to these as object IDs). A task is then created,
+scheduled, and executed somewhere in the cluster. This example would take 1
+second to execute.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Tasks executed in parallel.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;result&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;results&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;append&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;result&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;Note that the only changes are that we add the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;@ray.remote&lt;/code&gt; decorator to the
+function definition, we call the function with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;f.remote()&lt;/code&gt;, and we call
+&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt; on the list of object IDs (remember that object IDs are futures) in
+order to block until the corresponding tasks have finished executing.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/announcing_ray/graph1.png&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. There are no arrows between
+the 8 separate tasks indicating that all of the tasks can be executed in
+parallel.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;h1 id=&quot;flexible-encoding-of-task-dependencies&quot;&gt;Flexible Encoding of Task Dependencies&lt;/h1&gt;
+
+&lt;p&gt;In contrast with bulk-synchronous parallel frameworks like MapReduce or Apache
+Spark, Ray is designed to support AI applications which require fine-grained
+task dependencies. In contrast with the computation of aggregate statistics of
+an entire dataset, a training procedure may operate on a small subset of data or
+on the outputs of a handful of tasks.&lt;/p&gt;
+
+&lt;p&gt;Dependencies can be encoded by passing object IDs (which are the outputs of
+tasks) into other tasks.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;aggregate_data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;data&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;normal&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;size&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;intermediate_result&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;aggregate_data&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;intermediate_result&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;result&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;By passing the outputs of some calls to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;aggregate_data&lt;/code&gt; into subsequent calls
+to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;aggregate_data&lt;/code&gt;, we encode dependencies between these tasks which can be
+used by the system to make scheduling decisions and to coordinate the transfer
+of objects. Note that when object IDs are passed into remote function calls, the
+actual values will be unpacked before the function is executed, so when the
+&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;aggregate_data&lt;/code&gt; function is executed, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;x&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;y&lt;/code&gt; will be numpy arrays.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/announcing_ray/graph2.png&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. Arrows point from tasks to the
+objects they produce and from objects to the tasks that depend on
+them.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;h1 id=&quot;shared-mutable-state-with-actors&quot;&gt;Shared Mutable State with Actors&lt;/h1&gt;
+
+&lt;p&gt;Ray uses actors to share mutable state between tasks. Here is an example in
+which multiple tasks share the state of an Atari simulator. Each task runs the
+simulator for several steps picking up where the previous task left off.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;gym&lt;/span&gt;
+
+&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;nc&quot;&gt;Simulator&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;object&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;__init__&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;env&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;gym&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;make&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;Pong-v0&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;env&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;reset&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;step&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;action&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;env&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;step&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;action&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Create a simulator, this will start a new worker that will run all
+# methods for this actor.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;simulator&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;Simulator&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;observations&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;# Take action 0 in the simulator.
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;observations&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;append&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;simulator&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;step&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;Each call to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;simulator.step.remote&lt;/code&gt; generates a task that is scheduled on the
+actor. These tasks mutate the state of the simulator object, and they are
+executed one at a time.&lt;/p&gt;
+
+&lt;p&gt;Like remote functions, actor methods return object IDs (that is, futures) that
+can be passed into other tasks and whose values can be retrieved with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt;.&lt;/p&gt;
+
+&lt;div align=&quot;center&quot;&gt;
+&lt;img src=&quot;/assets/announcing_ray/graph3.png&quot; /&gt;
+&lt;/div&gt;
+&lt;div&gt;&lt;i&gt;A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. The first task is the actor's
+constructor. The thick arrows are used to show that the methods invoked on this
+actor share the underlying state of the actor.&lt;/i&gt;&lt;/div&gt;
+&lt;p&gt;&lt;br /&gt;&lt;/p&gt;
+
+&lt;h1 id=&quot;waiting-for-a-subset-of-tasks-to-finish&quot;&gt;Waiting for a Subset of Tasks to Finish&lt;/h1&gt;
+
+&lt;p&gt;Sometimes when running tasks with variable durations, we don’t want to wait for
+all of the tasks to finish. Instead, we may wish to wait for half of the tasks
+to finish or perhaps to use whichever tasks have completed after one second.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;o&quot;&gt;@&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;time&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;uniform&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Launch 10 tasks with variable durations.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Wait until either five tasks have completed or two seconds have passed and
+# return a list of the object IDs whose tasks have finished.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ready_ids&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;remaining_ids&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;wait&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;num_returns&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timeout&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;In this example &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ready_ids&lt;/code&gt; is a list of object IDs whose corresponding tasks
+have finished executing, and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;remaining_ids&lt;/code&gt; is a list of the remaining object
+IDs.&lt;/p&gt;
+
+&lt;p&gt;This primitive makes it easy to implement other behaviors, for example we may
+wish to process some tasks in the order that they complete.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;c1&quot;&gt;# Launch 10 tasks with variable durations.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remaining_ids&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remote&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Process the tasks in the order that they complete.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;results&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remaining_ids&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;ready_ids&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;remaining_ids&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;wait&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;remaining_ids&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;num_returns&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;results&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;append&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ready_ids&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]))&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;Note that it would be straightforward to modify the above example to adaptively
+launch new tasks whenever a previous one completes.&lt;/p&gt;
+
+&lt;h1 id=&quot;efficient-shared-memory-and-serialization-with-apache-arrow&quot;&gt;Efficient Shared Memory and Serialization with Apache Arrow&lt;/h1&gt;
+
+&lt;p&gt;Serializing and deserializing data is often a bottleneck in distributed
+computing. Ray lets worker processes on the same machine access the same objects
+through shared memory. To facilitate this, Ray uses an in-memory object store on
+each machine to serve objects.&lt;/p&gt;
+
+&lt;p&gt;To illustrate the problem, suppose we create some neural network weights and
+wish to ship them from one Python process to another.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;numpy&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;weights&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;Variable{}&quot;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;format&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;i&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;normal&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;size&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;5000000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+           &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;i&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;range&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)}&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# 2.68s&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;To ship the neural network weights around, we need to first serialize them into
+a contiguous blob of bytes. This can be done with standard serialization
+libraries like pickle.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;pickle&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;# Serialize the weights with pickle. Then deserialize them.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pickled_weights&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dumps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;weights&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;      &lt;span class=&quot;c1&quot;&gt;# 0.986s
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;new_weights&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pickle&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;loads&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pickled_weights&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# 0.241s&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;The time required for deserialization is particularly important because one of
+the most common patterns in machine learning is to aggregate a large number of
+values (for example, neural net weights, rollouts, or other values) in a single
+process, so the deserialization step could happen hundreds of times in a row.&lt;/p&gt;
+
+&lt;p&gt;To minimize the time required to deserialize objects in shared memory, we use
+the &lt;a href=&quot;https://arrow.apache.org/&quot;&gt;Apache Arrow&lt;/a&gt; data layout. This allows us to
+compute offsets into the serialized blob without scanning through the entire
+blob. &lt;strong&gt;In practice, this can translate into deserialization that is several
+orders of magnitude faster&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;c1&quot;&gt;# Serialize the weights and copy them into the object store. Then deserialize
+# them.
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;weights_id&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;put&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;weights&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;      &lt;span class=&quot;c1&quot;&gt;# 0.525s
+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;new_weights&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ray&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;weights_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;  &lt;span class=&quot;c1&quot;&gt;# 0.000622s&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;The call to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.put&lt;/code&gt; serializes the weights using Arrow and copies the result
+into the object store’s memory. The call to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt; then deserializes the
+serialized object and constructs a new dictionary of numpy arrays. However, the
+underlying arrays backing the numpy arrays live in shared memory and are not
+copied into the Python process’s heap.&lt;/p&gt;
+
+&lt;p&gt;Note that if the call to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.get&lt;/code&gt; happens from a different machine, the
+relevant serialized object will be copied from a machine where it lives to the
+machine where it is needed.&lt;/p&gt;
+
+&lt;p&gt;In this example, we call &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ray.put&lt;/code&gt; explicitly. However, normally this call would
+happen under the hood when a Python object is passed into a remote function or
+returned from a remote function.&lt;/p&gt;
+
+&lt;h1 id=&quot;feedback-is-appreciated&quot;&gt;Feedback is Appreciated&lt;/h1&gt;
+
+&lt;p&gt;This project is in its early stages. If you try it out, we’d love to hear your
+thoughts and suggestions.&lt;/p&gt;</content><author><name></name></author><summary type="html">This post announces Ray, a framework for efficiently running Python code on clusters and large mult-core machines.</summary></entry></feed>

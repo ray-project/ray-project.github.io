@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.6.1 -->
+<title>Implementing A Parameter Server in 15 Lines of Python with Ray | Ray: A fast and simple framework for distributed applications</title>
+<meta name="generator" content="Jekyll v3.8.5" />
+<meta property="og:title" content="Implementing A Parameter Server in 15 Lines of Python with Ray" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="This post describes how to implement a parameter server in Ray." />
+<meta property="og:description" content="This post describes how to implement a parameter server in Ray." />
+<link rel="canonical" href="/2018/07/15/parameter-server-in-fifteen-lines.html" />
+<meta property="og:url" content="/2018/07/15/parameter-server-in-fifteen-lines.html" />
+<meta property="og:site_name" content="Ray: A fast and simple framework for distributed applications" />
+<meta property="og:type" content="article" />
+<meta property="article:published_time" content="2018-07-15T14:00:00+00:00" />
+<script type="application/ld+json">
+{"@type":"BlogPosting","headline":"Implementing A Parameter Server in 15 Lines of Python with Ray","dateModified":"2018-07-15T14:00:00+00:00","url":"/2018/07/15/parameter-server-in-fifteen-lines.html","datePublished":"2018-07-15T14:00:00+00:00","mainEntityOfPage":{"@type":"WebPage","@id":"/2018/07/15/parameter-server-in-fifteen-lines.html"},"description":"This post describes how to implement a parameter server in Ray.","@context":"https://schema.org"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Ray: A fast and simple framework for distributed applications" /><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-110413294-2"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-110413294-2');
+</script>
+</head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Ray: A fast and simple framework for distributed applications</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title p-name" itemprop="name headline">Implementing A Parameter Server in 15 Lines of Python with Ray</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="2018-07-15T14:00:00+00:00" itemprop="datePublished">Jul 15, 2018
+      </time></p>
+  </header>
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>Parameter servers are a core part of many machine learning applications. Their
+role is to store the <em>parameters</em> of a machine learning model (e.g., the weights
+of a neural network) and to <em>serve</em> them to clients (clients are often workers
+that process data and compute updates to the parameters).</p>
+
+<p>Parameter servers (like databases) are normally built and shipped as standalone
+systems. This post describes how to use <a href="https://github.com/ray-project/ray">Ray</a> to implement a parameter server
+in a few lines of code.</p>
+
+<p>By turning the parameter server from a “system” into an “application”, this
+approach makes it orders of magnitude simpler to deploy parameter server
+applications. Similarly, by allowing applications and libraries to implement
+their own parameter servers, this approach makes the behavior of the parameter
+server much more configurable and flexible (since the application can simply
+modify the implementation with a few lines of Python).</p>
+
+<p><strong>What is Ray?</strong> <a href="https://github.com/ray-project/ray">Ray</a> is a general-purpose framework for parallel and
+distributed Python. Ray provides a unified task-parallel and actor abstraction
+and achieves high performance through shared memory, zero-copy serialization,
+and distributed scheduling. Ray also includes high-performance libraries
+targeting AI applications, for example <a href="http://ray.readthedocs.io/en/latest/tune.html">hyperparameter tuning</a> and
+<a href="http://ray.readthedocs.io/en/latest/rllib.html">reinforcement learning</a>.</p>
+
+<h2 id="what-is-a-parameter-server">What is a Parameter Server?</h2>
+
+<p>A parameter server is a key-value store used for training machine learning
+models on a cluster. The <strong>values</strong> are the parameters of a machine-learning
+model (e.g., a neural network). The <strong>keys</strong> index the model parameters.</p>
+
+<p>For example, in a movie <strong>recommendation system</strong>, there may be one key per user
+and one key per movie. For each user and movie, there are corresponding
+user-specific and movie-specific parameters. In a <strong>language-modeling</strong>
+application, words may act as keys and their embeddings may be the values. In
+its simplest form, a parameter server may implicitly have a single key and allow
+all of the parameters to be retrieved and updated at once. We show how such a
+parameter server can be implemented as a Ray actor (15 lines) below.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+<span class="kn">import</span> <span class="nn">ray</span>
+
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">class</span> <span class="nc">ParameterServer</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dim</span><span class="p">):</span>
+        <span class="c1"># Alternatively, params could be a dictionary mapping keys to arrays.
+</span>        <span class="bp">self</span><span class="o">.</span><span class="n">params</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">dim</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span>
+
+    <span class="k">def</span> <span class="nf">update_params</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">grad</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">params</span> <span class="o">+=</span> <span class="n">grad</span>
+</code></pre></div></div>
+
+<p><strong>The <code class="language-plaintext highlighter-rouge">@ray.remote</code> decorator defines a service.</strong> It takes the
+<code class="language-plaintext highlighter-rouge">ParameterServer</code> class and allows it to be instantiated as a remote service or
+actor.</p>
+
+<p>Here, we assume that the update is a gradient which should be added to the
+parameter vector. This is just the simplest possible example, and many different
+choices could be made.</p>
+
+<p><strong>A parameter server typically exists as a remote process or service</strong> and
+interacts with clients through remote procedure calls. To instantiate the
+parameter server as a remote actor, we can do the following.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># We need to start Ray first.
+</span><span class="n">ray</span><span class="o">.</span><span class="n">init</span><span class="p">()</span>
+
+<span class="c1"># Create a parameter server process.
+</span><span class="n">ps</span> <span class="o">=</span> <span class="n">ParameterServer</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p><strong>Actor method invocations return futures.</strong> If we want to retrieve the actual
+values, we can use a blocking <code class="language-plaintext highlighter-rouge">ray.get</code> call. For example,</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">&gt;&gt;&gt;</span> <span class="n">params_id</span> <span class="o">=</span> <span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span>  <span class="c1"># This returns a future.
+</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">params_id</span>
+<span class="n">ObjectID</span><span class="p">(</span><span class="mi">7268</span><span class="n">cb8d345ef26632430df6f18cc9690eb6b300</span><span class="p">)</span>
+
+<span class="o">&gt;&gt;&gt;</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">params_id</span><span class="p">)</span>  <span class="c1"># This blocks until the task finishes.
+</span><span class="n">array</span><span class="p">([</span><span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">])</span>
+</code></pre></div></div>
+
+<p>Now, suppose we want to start some worker tasks that continuously compute
+gradients and update the model parameters. Each worker will run in a loop that
+does three things:</p>
+<ol>
+  <li>Get the latest parameters.</li>
+  <li>Compute an update to the parameters.</li>
+  <li>Update the parameters.</li>
+</ol>
+
+<p>As a Ray remote function (though the worker could also be an actor), this looks
+like the following.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">time</span>
+
+<span class="c1"># Note that the worker function takes a handle to the parameter server as an
+# argument, which allows the worker task to invoke methods on the parameter
+# server actor.
+</span>
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">worker</span><span class="p">(</span><span class="n">ps</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">):</span>
+        <span class="c1"># Get the latest parameters.
+</span>        <span class="n">params_id</span> <span class="o">=</span> <span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span>  <span class="c1"># This method call is non-blocking
+</span>                                            <span class="c1"># and returns a future.
+</span>        <span class="n">params</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">params_id</span><span class="p">)</span>  <span class="c1"># This is a blocking call which waits for
+</span>                                     <span class="c1"># the task to finish and gets the results.
+</span>
+        <span class="c1"># Compute a gradient update. Here we just make a fake update, but in
+</span>        <span class="c1"># practice this would use a library like TensorFlow and would also take
+</span>        <span class="c1"># in a batch of data.
+</span>        <span class="n">grad</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>  <span class="c1"># This is a fake placeholder for some computation.
+</span>
+        <span class="c1"># Update the parameters.
+</span>        <span class="n">ps</span><span class="o">.</span><span class="n">update_params</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">grad</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Then we can start several worker tasks as follows.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># Start 2 workers.
+</span><span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">):</span>
+    <span class="n">worker</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">ps</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Then we can retrieve the parameters from the driver process and see that they
+are being updated by the workers.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">&gt;&gt;&gt;</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">())</span>
+<span class="n">array</span><span class="p">([</span><span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">])</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">())</span>
+<span class="n">array</span><span class="p">([</span><span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">,</span> <span class="mf">78.</span><span class="p">])</span>
+</code></pre></div></div>
+
+<p>Part of the value that Ray adds here is that <em>Ray makes it as easy to start up a
+remote service or actor as it is to define a Python class</em>. Handles to the actor
+can be passed around to other actors and tasks to allow arbitrary and intuitive
+messaging and communication patterns. Current alternatives are much more
+involved. For example, <a href="https://grpc.io/docs/tutorials/basic/python.html#defining-the-service">consider how the equivalent runtime service creation and
+service handle passing would be done with GRPC</a>.</p>
+
+<h2 id="additional-extensions">Additional Extensions</h2>
+
+<p>Here we describe some important modifications to the above design. We describe
+additional natural extensions in <a href="http://www.sysml.cc/doc/206.pdf">this paper</a>.</p>
+
+<p><strong>Sharding Across Multiple Parameter Servers:</strong> When your parameters are large
+and your cluster is large, a single parameter server may not suffice because the
+application could be bottlenecked by the network bandwidth into and out of the
+machine that the parameter server is on (especially if there are many workers).</p>
+
+<p>A natural solution in this case is to shard the parameters across multiple
+parameter servers. This can be achieved by simply starting up multiple parameter
+server actors. An example of how to do this is shown in the code example at the
+bottom.</p>
+
+<p><strong>Controlling Actor Placement:</strong> The placement of specific actors and tasks on
+different machines can be specified by using Ray’s support for arbitrary
+<a href="http://ray.readthedocs.io/en/latest/resources.html">resource requirements</a>. For example, if the worker requires a GPU, then its
+remote decorator can be declared with <code class="language-plaintext highlighter-rouge">@ray.remote(num_gpus=1)</code>. Arbitrary
+custom resources can be defined as well.</p>
+
+<h2 id="unifying-tasks-and-actors">Unifying Tasks and Actors</h2>
+
+<p>Ray supports parameter server applications efficiently in large part due to its
+unified task-parallel and actor abstraction.</p>
+
+<p>Popular data processing systems such as <a href="http://spark.apache.org">Apache Spark</a> allow stateless tasks
+(functions with no side effects) to operate on immutable data. This assumption
+simplifies the overall system design and makes it easier for applications to
+reason about correctness.</p>
+
+<p>However, mutable state that is shared between many tasks is a recurring theme in
+machine learning applications. That state could be the weights of a neural
+network, the state of a third-party simulator, or an encapsulation of an
+interaction with the physical world.</p>
+
+<p>To support these kinds of applications, Ray introduces an actor abstraction. An
+actor will execute methods serially (so there are no concurrency issues), and
+each method can arbitrarily mutate the actor’s internal state. Methods can be
+invoked by other actors and tasks (and even by other applications on the same
+cluster).</p>
+
+<p>One thing that makes Ray so powerful is that it <em>unifies the actor abstraction
+with the task-parallel abstraction</em> inheriting the benefits of both approaches.
+Ray uses an underlying dynamic task graph to implement both actors and stateless
+tasks in the same framework. As a consequence, these two abstractions are
+completely interoperable. Tasks and actors can be created from within other
+tasks and actors. Both return futures, which can be passed into other tasks or
+actor methods to introduce scheduling and data dependencies. As a result, Ray
+applications inherit the best features of both tasks and actors.</p>
+
+<h2 id="under-the-hood">Under the Hood</h2>
+
+<p><strong>Dynamic Task Graphs:</strong> Under the hood, remote function invocations and actor
+method invocations create tasks that are added to a dynamically growing graph of
+tasks. The Ray backend is in charge of scheduling and executing these tasks
+across a cluster (or a single multi-core machine). Tasks can be created by the
+“driver” application or by other tasks.</p>
+
+<p><strong>Data:</strong> Ray efficiently serializes data using the <a href="https://ray-project.github.io/2017/10/15/fast-python-serialization-with-ray-and-arrow.html">Apache Arrow</a> data
+layout. Objects are shared between workers and actors on the same machine
+through <a href="https://ray-project.github.io/2017/08/08/plasma-in-memory-object-store.html">shared memory</a>, which avoids the need for copies or
+deserialization. This optimization is absolutely critical for achieving good
+performance.</p>
+
+<p><strong>Scheduling:</strong> Ray uses a distributed scheduling approach. Each machine has its
+own scheduler, which manages the workers and actors on that machine. Tasks are
+submitted by applications and workers to the scheduler on the same machine. From
+there, they can be reassigned to other workers or passed to other local
+schedulers. This allows Ray to achieve substantially higher task throughput than
+what can be achieved with a centralized scheduler, which is important for
+machine learning applications.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>A parameter server is normally implemented and shipped as a standalone system.
+The thing that makes this approach so powerful is that we’re able to implement a
+parameter server with a few lines of code as an application. <em>This approach
+makes it much simpler to deploy applications that use parameter servers and to
+modify the behavior of the parameter server.</em> For example, if we want to shard
+the parameter server, change the update rule, switch between asynchronous and
+synchronous updates, ignore straggler workers, or any number of other
+customizations, we can do each of these things with a few extra lines of code.</p>
+
+<p>This post describes how to use Ray actors to implement a parameter server.
+However, actors are a much more general concept and can be useful for many
+applications that involve stateful computation. Examples include logging,
+streaming, simulation, model serving, graph processing, and many others.</p>
+
+<h2 id="running-this-code">Running this Code</h2>
+
+<p>To run the complete application, first install Ray with <code class="language-plaintext highlighter-rouge">pip install ray</code>. Then
+you should be able to run the code below, which implements a sharded parameter
+server.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+<span class="kn">import</span> <span class="nn">ray</span>
+<span class="kn">import</span> <span class="nn">time</span>
+
+<span class="c1"># Start Ray.
+</span><span class="n">ray</span><span class="o">.</span><span class="n">init</span><span class="p">()</span>
+
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">class</span> <span class="nc">ParameterServer</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dim</span><span class="p">):</span>
+        <span class="c1"># Alternatively, params could be a dictionary mapping keys to arrays.
+</span>        <span class="bp">self</span><span class="o">.</span><span class="n">params</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">dim</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span>
+
+    <span class="k">def</span> <span class="nf">update_params</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">grad</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">params</span> <span class="o">+=</span> <span class="n">grad</span>
+
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">worker</span><span class="p">(</span><span class="o">*</span><span class="n">parameter_servers</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">):</span>
+        <span class="c1"># Get the latest parameters.
+</span>        <span class="n">parameter_shards</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+          <span class="p">[</span><span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span> <span class="k">for</span> <span class="n">ps</span> <span class="ow">in</span> <span class="n">parameter_servers</span><span class="p">])</span>
+        <span class="n">params</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span><span class="n">parameter_shards</span><span class="p">)</span>
+
+        <span class="c1"># Compute a gradient update. Here we just make a fake
+</span>        <span class="c1"># update, but in practice this would use a library like
+</span>        <span class="c1"># TensorFlow and would also take in a batch of data.
+</span>        <span class="n">grad</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>  <span class="c1"># This is a fake placeholder for some computation.
+</span>        <span class="n">grad_shards</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">grad</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">parameter_servers</span><span class="p">))</span>
+
+        <span class="c1"># Send the gradient updates to the parameter servers.
+</span>        <span class="k">for</span> <span class="n">ps</span><span class="p">,</span> <span class="n">grad</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">parameter_servers</span><span class="p">,</span> <span class="n">grad_shards</span><span class="p">):</span>
+            <span class="n">ps</span><span class="o">.</span><span class="n">update_params</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">grad</span><span class="p">)</span>
+
+
+<span class="c1"># Start two parameter servers, each with half of the parameters.
+</span><span class="n">parameter_servers</span> <span class="o">=</span> <span class="p">[</span><span class="n">ParameterServer</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">)]</span>
+
+<span class="c1"># Start 2 workers.
+</span><span class="n">workers</span> <span class="o">=</span> <span class="p">[</span><span class="n">worker</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="o">*</span><span class="n">parameter_servers</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">)]</span>
+
+<span class="c1"># Inspect the parameters at regular intervals.
+</span><span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">5</span><span class="p">):</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">([</span><span class="n">ps</span><span class="o">.</span><span class="n">get_params</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span> <span class="k">for</span> <span class="n">ps</span> <span class="ow">in</span> <span class="n">parameter_servers</span><span class="p">]))</span>
+</code></pre></div></div>
+
+<p>Note that this example focuses on simplicity and that more can be done to
+optimize this code.</p>
+
+<h2 id="read-more">Read More</h2>
+
+<p>For more information about Ray, take a look at the following links:</p>
+<ol>
+  <li>The Ray <a href="http://ray.readthedocs.io/en/latest">documentation</a></li>
+  <li>The Ray <a href="http://ray.readthedocs.io/en/latest/api.html">API</a></li>
+  <li>Fast <a href="https://ray-project.github.io/2017/10/15/fast-python-serialization-with-ray-and-arrow.html">serialization</a> with Ray and Apache Arrow</li>
+  <li>A <a href="https://arxiv.org/abs/1712.05889">paper</a> describing the Ray system</li>
+  <li>Efficient <a href="http://ray.readthedocs.io/en/latest/tune.html">hyperparameter</a> tuning with Ray</li>
+  <li>Scalable <a href="http://ray.readthedocs.io/en/latest/rllib.html">reinforcement</a> learning with Ray and <a href="https://arxiv.org/abs/1712.09381">the RLlib paper</a></li>
+  <li>Speeding up <a href="https://github.com/modin-project/modin">Pandas</a> with Ray</li>
+</ol>
+
+<p>Questions should be directed to <em>ray-dev@googlegroups.com</em>.</p>
+
+
+  </div><a class="u-url" href="/2018/07/15/parameter-server-in-fifteen-lines.html" hidden></a>
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">Ray: A fast and simple framework for distributed applications</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li class="p-name">Ray: A fast and simple framework for distributed applications</li><li><a class="u-email" href="mailto:"></a></li></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"><li><a href="https://github.com/ray-project"><svg class="svg-icon"><use xlink:href="/assets/minima-social-icons.svg#github"></use></svg> <span class="username">ray-project</span></a></li></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Ray is a fast and simple framework for building and running distributed applications.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+</body>
+
+</html>

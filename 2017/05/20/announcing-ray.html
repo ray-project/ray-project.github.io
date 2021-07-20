@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.6.1 -->
+<title>Ray: A Distributed Execution Framework for AI Applications | Ray: A fast and simple framework for distributed applications</title>
+<meta name="generator" content="Jekyll v3.8.5" />
+<meta property="og:title" content="Ray: A Distributed Execution Framework for AI Applications" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="This post announces Ray, a framework for efficiently running Python code on clusters and large mult-core machines." />
+<meta property="og:description" content="This post announces Ray, a framework for efficiently running Python code on clusters and large mult-core machines." />
+<link rel="canonical" href="/2017/05/20/announcing-ray.html" />
+<meta property="og:url" content="/2017/05/20/announcing-ray.html" />
+<meta property="og:site_name" content="Ray: A fast and simple framework for distributed applications" />
+<meta property="og:type" content="article" />
+<meta property="article:published_time" content="2017-05-20T14:00:00+00:00" />
+<script type="application/ld+json">
+{"@type":"BlogPosting","headline":"Ray: A Distributed Execution Framework for AI Applications","dateModified":"2017-05-20T14:00:00+00:00","url":"/2017/05/20/announcing-ray.html","datePublished":"2017-05-20T14:00:00+00:00","mainEntityOfPage":{"@type":"WebPage","@id":"/2017/05/20/announcing-ray.html"},"description":"This post announces Ray, a framework for efficiently running Python code on clusters and large mult-core machines.","@context":"https://schema.org"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Ray: A fast and simple framework for distributed applications" /><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-110413294-2"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-110413294-2');
+</script>
+</head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Ray: A fast and simple framework for distributed applications</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title p-name" itemprop="name headline">Ray: A Distributed Execution Framework for AI Applications</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="2017-05-20T14:00:00+00:00" itemprop="datePublished">May 20, 2017
+      </time></p>
+  </header>
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>This post announces Ray, a framework for efficiently running Python code on
+clusters and large multi-core machines. The project is open source.
+You can check out <a href="https://github.com/ray-project/ray">the code</a> and
+<a href="http://ray.readthedocs.io/en/latest/?badge=latest">the documentation</a>.</p>
+
+<p>Many AI algorithms are computationally intensive and exhibit complex
+communication patterns. As a result, many researchers spend most of their
+time building custom systems to efficiently distribute their code across
+clusters of machines.</p>
+
+<p>However, the resulting systems are often specific to a single algorithm or class
+of algorithms. We built Ray to help eliminate a bunch of the redundant
+engineering effort that is currently repeated over and over for each new
+algorithm. Our hope is that a few basic primitives can be reused to implement
+and to efficiently execute a broad range of algorithms and applications.</p>
+
+<div align="center">
+<iframe width="560" height="315" src="https://www.youtube.com/embed/07eIebEk1MM?autoplay=1&amp;loop=1&amp;playlist=07eIebEk1MM" frameborder="0" allowfullscreen=""></iframe>
+<div>A simulated robot learning to run using Ray.</div>
+</div>
+<p><br /></p>
+
+<h1 id="simple-parallelization-of-existing-code">Simple Parallelization of Existing Code</h1>
+
+<p>Ray enables Python functions to be executed remotely with minimal modifications.</p>
+
+<p>With <strong>regular Python</strong>, when you call a function, the call blocks until the
+function has been executed. This example would take 8 seconds to execute.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">f</span><span class="p">():</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># Calls to f executed serially.
+</span><span class="n">results</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">8</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">f</span><span class="p">()</span>
+    <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="p">)</span></code></pre></figure>
+
+<p><strong>With Ray</strong>, when you call a <strong>remote function</strong>, the call immediately returns
+a future (we will refer to these as object IDs). A task is then created,
+scheduled, and executed somewhere in the cluster. This example would take 1
+second to execute.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">f</span><span class="p">():</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># Tasks executed in parallel.
+</span><span class="n">results</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">8</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span>
+    <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+
+<span class="n">results</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">results</span><span class="p">)</span></code></pre></figure>
+
+<p>Note that the only changes are that we add the <code class="language-plaintext highlighter-rouge">@ray.remote</code> decorator to the
+function definition, we call the function with <code class="language-plaintext highlighter-rouge">f.remote()</code>, and we call
+<code class="language-plaintext highlighter-rouge">ray.get</code> on the list of object IDs (remember that object IDs are futures) in
+order to block until the corresponding tasks have finished executing.</p>
+
+<div align="center">
+<img src="/assets/announcing_ray/graph1.png" />
+</div>
+<div><i>A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. There are no arrows between
+the 8 separate tasks indicating that all of the tasks can be executed in
+parallel.</i></div>
+<p><br /></p>
+
+<h1 id="flexible-encoding-of-task-dependencies">Flexible Encoding of Task Dependencies</h1>
+
+<p>In contrast with bulk-synchronous parallel frameworks like MapReduce or Apache
+Spark, Ray is designed to support AI applications which require fine-grained
+task dependencies. In contrast with the computation of aggregate statistics of
+an entire dataset, a training procedure may operate on a small subset of data or
+on the outputs of a handful of tasks.</p>
+
+<p>Dependencies can be encoded by passing object IDs (which are the outputs of
+tasks) into other tasks.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">aggregate_data</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+
+<span class="n">data</span> <span class="o">=</span> <span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="mi">1000</span><span class="p">)</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)]</span>
+
+<span class="k">while</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+  <span class="n">intermediate_result</span> <span class="o">=</span> <span class="n">aggregate_data</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">data</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+  <span class="n">data</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="mi">2</span><span class="p">:]</span> <span class="o">+</span> <span class="p">[</span><span class="n">intermediate_result</span><span class="p">]</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span></code></pre></figure>
+
+<p>By passing the outputs of some calls to <code class="language-plaintext highlighter-rouge">aggregate_data</code> into subsequent calls
+to <code class="language-plaintext highlighter-rouge">aggregate_data</code>, we encode dependencies between these tasks which can be
+used by the system to make scheduling decisions and to coordinate the transfer
+of objects. Note that when object IDs are passed into remote function calls, the
+actual values will be unpacked before the function is executed, so when the
+<code class="language-plaintext highlighter-rouge">aggregate_data</code> function is executed, <code class="language-plaintext highlighter-rouge">x</code> and <code class="language-plaintext highlighter-rouge">y</code> will be numpy arrays.</p>
+
+<div align="center">
+<img src="/assets/announcing_ray/graph2.png" />
+</div>
+<div><i>A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. Arrows point from tasks to the
+objects they produce and from objects to the tasks that depend on
+them.</i></div>
+<p><br /></p>
+
+<h1 id="shared-mutable-state-with-actors">Shared Mutable State with Actors</h1>
+
+<p>Ray uses actors to share mutable state between tasks. Here is an example in
+which multiple tasks share the state of an Atari simulator. Each task runs the
+simulator for several steps picking up where the previous task left off.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">gym</span>
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">class</span> <span class="nc">Simulator</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">env</span> <span class="o">=</span> <span class="n">gym</span><span class="o">.</span><span class="n">make</span><span class="p">(</span><span class="s">"Pong-v0"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">reset</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">action</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">action</span><span class="p">)</span>
+
+<span class="c1"># Create a simulator, this will start a new worker that will run all
+# methods for this actor.
+</span><span class="n">simulator</span> <span class="o">=</span> <span class="n">Simulator</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span>
+
+<span class="n">observations</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+    <span class="c1"># Take action 0 in the simulator.
+</span>    <span class="n">observations</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">simulator</span><span class="o">.</span><span class="n">step</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span></code></pre></figure>
+
+<p>Each call to <code class="language-plaintext highlighter-rouge">simulator.step.remote</code> generates a task that is scheduled on the
+actor. These tasks mutate the state of the simulator object, and they are
+executed one at a time.</p>
+
+<p>Like remote functions, actor methods return object IDs (that is, futures) that
+can be passed into other tasks and whose values can be retrieved with <code class="language-plaintext highlighter-rouge">ray.get</code>.</p>
+
+<div align="center">
+<img src="/assets/announcing_ray/graph3.png" />
+</div>
+<div><i>A graph depicting the tasks and objects in this example. The circles
+represent tasks, and the boxes represent objects. The first task is the actor's
+constructor. The thick arrows are used to show that the methods invoked on this
+actor share the underlying state of the actor.</i></div>
+<p><br /></p>
+
+<h1 id="waiting-for-a-subset-of-tasks-to-finish">Waiting for a Subset of Tasks to Finish</h1>
+
+<p>Sometimes when running tasks with variable durations, we don’t want to wait for
+all of the tasks to finish. Instead, we may wish to wait for half of the tasks
+to finish or perhaps to use whichever tasks have completed after one second.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">f</span><span class="p">():</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">5</span><span class="p">))</span>
+
+<span class="c1"># Launch 10 tasks with variable durations.
+</span><span class="n">results</span> <span class="o">=</span> <span class="p">[</span><span class="n">f</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">)]</span>
+
+<span class="c1"># Wait until either five tasks have completed or two seconds have passed and
+# return a list of the object IDs whose tasks have finished.
+</span><span class="n">ready_ids</span><span class="p">,</span> <span class="n">remaining_ids</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">results</span><span class="p">,</span> <span class="n">num_returns</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">2000</span><span class="p">)</span></code></pre></figure>
+
+<p>In this example <code class="language-plaintext highlighter-rouge">ready_ids</code> is a list of object IDs whose corresponding tasks
+have finished executing, and <code class="language-plaintext highlighter-rouge">remaining_ids</code> is a list of the remaining object
+IDs.</p>
+
+<p>This primitive makes it easy to implement other behaviors, for example we may
+wish to process some tasks in the order that they complete.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="c1"># Launch 10 tasks with variable durations.
+</span><span class="n">remaining_ids</span> <span class="o">=</span> <span class="p">[</span><span class="n">f</span><span class="o">.</span><span class="n">remote</span><span class="p">()</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">)]</span>
+
+<span class="c1"># Process the tasks in the order that they complete.
+</span><span class="n">results</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">while</span> <span class="nb">len</span><span class="p">(</span><span class="n">remaining_ids</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+    <span class="n">ready_ids</span><span class="p">,</span> <span class="n">remaining_ids</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">remaining_ids</span><span class="p">,</span> <span class="n">num_returns</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">ready_ids</span><span class="p">[</span><span class="mi">0</span><span class="p">]))</span></code></pre></figure>
+
+<p>Note that it would be straightforward to modify the above example to adaptively
+launch new tasks whenever a previous one completes.</p>
+
+<h1 id="efficient-shared-memory-and-serialization-with-apache-arrow">Efficient Shared Memory and Serialization with Apache Arrow</h1>
+
+<p>Serializing and deserializing data is often a bottleneck in distributed
+computing. Ray lets worker processes on the same machine access the same objects
+through shared memory. To facilitate this, Ray uses an in-memory object store on
+each machine to serve objects.</p>
+
+<p>To illustrate the problem, suppose we create some neural network weights and
+wish to ship them from one Python process to another.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+
+<span class="n">weights</span> <span class="o">=</span> <span class="p">{</span><span class="s">"Variable{}"</span><span class="o">.</span><span class="nb">format</span><span class="p">(</span><span class="n">i</span><span class="p">):</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="mi">5000000</span><span class="p">)</span>
+           <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">)}</span>  <span class="c1"># 2.68s</span></code></pre></figure>
+
+<p>To ship the neural network weights around, we need to first serialize them into
+a contiguous blob of bytes. This can be done with standard serialization
+libraries like pickle.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">pickle</span>
+
+<span class="c1"># Serialize the weights with pickle. Then deserialize them.
+</span><span class="n">pickled_weights</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">weights</span><span class="p">)</span>      <span class="c1"># 0.986s
+</span><span class="n">new_weights</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">pickled_weights</span><span class="p">)</span>  <span class="c1"># 0.241s</span></code></pre></figure>
+
+<p>The time required for deserialization is particularly important because one of
+the most common patterns in machine learning is to aggregate a large number of
+values (for example, neural net weights, rollouts, or other values) in a single
+process, so the deserialization step could happen hundreds of times in a row.</p>
+
+<p>To minimize the time required to deserialize objects in shared memory, we use
+the <a href="https://arrow.apache.org/">Apache Arrow</a> data layout. This allows us to
+compute offsets into the serialized blob without scanning through the entire
+blob. <strong>In practice, this can translate into deserialization that is several
+orders of magnitude faster</strong>.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="c1"># Serialize the weights and copy them into the object store. Then deserialize
+# them.
+</span><span class="n">weights_id</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">weights</span><span class="p">)</span>      <span class="c1"># 0.525s
+</span><span class="n">new_weights</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">weights_id</span><span class="p">)</span>  <span class="c1"># 0.000622s</span></code></pre></figure>
+
+<p>The call to <code class="language-plaintext highlighter-rouge">ray.put</code> serializes the weights using Arrow and copies the result
+into the object store’s memory. The call to <code class="language-plaintext highlighter-rouge">ray.get</code> then deserializes the
+serialized object and constructs a new dictionary of numpy arrays. However, the
+underlying arrays backing the numpy arrays live in shared memory and are not
+copied into the Python process’s heap.</p>
+
+<p>Note that if the call to <code class="language-plaintext highlighter-rouge">ray.get</code> happens from a different machine, the
+relevant serialized object will be copied from a machine where it lives to the
+machine where it is needed.</p>
+
+<p>In this example, we call <code class="language-plaintext highlighter-rouge">ray.put</code> explicitly. However, normally this call would
+happen under the hood when a Python object is passed into a remote function or
+returned from a remote function.</p>
+
+<h1 id="feedback-is-appreciated">Feedback is Appreciated</h1>
+
+<p>This project is in its early stages. If you try it out, we’d love to hear your
+thoughts and suggestions.</p>
+
+  </div><a class="u-url" href="/2017/05/20/announcing-ray.html" hidden></a>
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">Ray: A fast and simple framework for distributed applications</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li class="p-name">Ray: A fast and simple framework for distributed applications</li><li><a class="u-email" href="mailto:"></a></li></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"><li><a href="https://github.com/ray-project"><svg class="svg-icon"><use xlink:href="/assets/minima-social-icons.svg#github"></use></svg> <span class="username">ray-project</span></a></li></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Ray is a fast and simple framework for building and running distributed applications.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+</body>
+
+</html>

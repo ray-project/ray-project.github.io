@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.6.1 -->
+<title>Ray: 0.2 Release | Ray: A fast and simple framework for distributed applications</title>
+<meta name="generator" content="Jekyll v3.8.5" />
+<meta property="og:title" content="Ray: 0.2 Release" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="This post announces the release of Ray 0.2." />
+<meta property="og:description" content="This post announces the release of Ray 0.2." />
+<link rel="canonical" href="/2017/09/30/ray-0.2-release.html" />
+<meta property="og:url" content="/2017/09/30/ray-0.2-release.html" />
+<meta property="og:site_name" content="Ray: A fast and simple framework for distributed applications" />
+<meta property="og:type" content="article" />
+<meta property="article:published_time" content="2017-09-30T14:00:00+00:00" />
+<script type="application/ld+json">
+{"@type":"BlogPosting","headline":"Ray: 0.2 Release","dateModified":"2017-09-30T14:00:00+00:00","url":"/2017/09/30/ray-0.2-release.html","datePublished":"2017-09-30T14:00:00+00:00","mainEntityOfPage":{"@type":"WebPage","@id":"/2017/09/30/ray-0.2-release.html"},"description":"This post announces the release of Ray 0.2.","@context":"https://schema.org"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Ray: A fast and simple framework for distributed applications" /><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-110413294-2"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-110413294-2');
+</script>
+</head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Ray: A fast and simple framework for distributed applications</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title p-name" itemprop="name headline">Ray: 0.2 Release</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="2017-09-30T14:00:00+00:00" itemprop="datePublished">Sep 30, 2017
+      </time></p>
+  </header>
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>We are pleased to announce the Ray 0.2 release. This release includes the
+following:</p>
+<ul>
+  <li>substantial <a href="http://ray.readthedocs.io/en/latest/plasma-object-store.html">performance improvements to the Plasma object store</a></li>
+  <li>an initial <a href="http://ray.readthedocs.io/en/latest/webui.html">Jupyter notebook based web UI</a></li>
+  <li>the start of a <a href="http://ray.readthedocs.io/en/latest/rllib.html">scalable reinforcement learning library</a></li>
+  <li><a href="http://ray.readthedocs.io/en/latest/fault-tolerance.html">fault tolerance for actors</a></li>
+</ul>
+
+<h2 id="plasma">Plasma</h2>
+
+<p>Since the last release, the Plasma object store has moved out of the Ray
+codebase and is <strong>now being developed as part of <a href="https://github.com/apache/arrow">Apache Arrow</a></strong> (see the
+<a href="https://arrow.apache.org/docs/python/plasma.html">relevant documentation</a>), so that it can be used as a standalone component
+by other projects to leverage high-performance shared memory. In addition, our
+Arrow-based serialization libraries have been moved into pyarrow (see the
+<a href="https://arrow.apache.org/docs/python/ipc.html#arbitrary-object-serialization">relevant documentation</a>).</p>
+
+<p>In 0.2, we’ve increased the write throughput of the object store to around
+15GB/s for large objects (when writing from a single client). Achieving this
+performance requires enabling huge pages (to minimize the number of TLB cache
+misses). Instructions for doing so are <a href="http://ray.readthedocs.io/en/latest/plasma-object-store.html">here</a>.</p>
+
+<p>The speed at which objects can be written into the object store is a key
+performance metric. For example, it is the bottleneck for <a href="http://ray.readthedocs.io/en/latest/example-a3c.html">A3C</a> and many
+other algorithms.</p>
+
+<p>You can benchmark write throughput as follows.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+<span class="kn">import</span> <span class="nn">ray</span>
+
+<span class="n">ray</span><span class="o">.</span><span class="n">init</span><span class="p">()</span>
+
+<span class="n">x</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">10</span> <span class="o">**</span> <span class="mi">9</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
+
+<span class="c1"># Measure the time required to write 1GB to the Plasma store.
+</span><span class="o">%</span><span class="n">time</span> <span class="n">x_id</span> <span class="o">=</span> <span class="n">ray</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+</code></pre></div></div>
+
+<h2 id="web-ui">Web UI</h2>
+
+<p>We’ve built an initial Jupyter-notebook-based web UI for understanding and
+debugging application performance. See the <a href="http://ray.readthedocs.io/en/latest/webui.html">instructions for using the UI</a>.
+The UI includes a task timeline visualization based on Chrome tracing to see
+where tasks were scheduled, how long they took, and what the dependencies
+between the tasks were. An example visualization is shown below.</p>
+
+<div align="center">
+<img src="/assets/ray_0.2_release/timeline_visualization.png" />
+</div>
+<div><i>A visualization of the task timeline. Boxes indicate tasks and arrows
+indicate data dependencies between tasks.</i></div>
+<p><br /></p>
+
+<p>This type of visualization can immediately expose problems with performance,
+scheduling, and load balancing.</p>
+
+<p>The above visualization can be generated on a single machine by the following
+script.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">ray</span>
+<span class="kn">import</span> <span class="nn">time</span>
+
+<span class="n">ray</span><span class="o">.</span><span class="n">init</span><span class="p">()</span>
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">f</span><span class="p">(</span><span class="n">x</span><span class="p">):</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.001</span><span class="p">)</span>
+    <span class="k">return</span> <span class="mi">1</span>
+
+<span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span>
+<span class="k">def</span> <span class="nf">g</span><span class="p">(</span><span class="o">*</span><span class="n">ys</span><span class="p">):</span>
+    <span class="k">return</span> <span class="mi">1</span>
+
+<span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="n">x</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">):</span>
+    <span class="n">ys</span> <span class="o">=</span> <span class="p">[</span><span class="n">f</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">8</span><span class="p">)]</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="o">*</span><span class="n">ys</span><span class="p">)</span>
+</code></pre></div></div>
+
+<h2 id="rllib">RLlib</h2>
+
+<p>We’ve begun implementing a <a href="http://ray.readthedocs.io/en/latest/rllib.html">scalable reinforcement learning library</a> based on
+Ray. So far it includes implementations of the following algorithms.</p>
+
+<ul>
+  <li>Proximal policy optimization (PPO)</li>
+  <li>Deep Q-learning (DQN)</li>
+  <li>Asynchronous advantage actor critic (A3C)</li>
+  <li>Evolution Strategies (ES)</li>
+</ul>
+
+<p>The DQN, A3C, and ES implementations are based on the <a href="https://github.com/openai/baselines">OpenAI baselines</a>.
+Example code for training is available and can be used as follows.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code># On a single machine.
+python ray/python/ray/rllib/train.py --alg=PPO \
+                                     --env=CartPole-v0
+
+# On a cluster.
+python ray/python/ray/rllib/train.py --alg=PPO \
+                                     --env=CartPole-v0 \
+                                     --redis-address=&lt;head-node-ip&gt;:6379
+</code></pre></div></div>
+
+<p>This uses <a href="https://arxiv.org/abs/1707.06347">proximal policy optimization</a> to train a policy to control an
+agent in the CartPole environment.</p>
+
+<p>Running this (on the Humanoid-v1 environment to train a walking humanoid robot)
+on AWS with a cluster of fifteen m4.16xlarge instances and one p2.16xlarge
+instance, we achieve a reward of over 6000 in around 35 minutes. The rollouts
+are parallelized over 512 physical cores and the policy optimization is
+parallelized over 6 GPUs. Relevant hyperparameters for this experiment are
+<a href="https://github.com/ray-project/ray/blob/b020e6bf1fb00d0745371d8674146d4a5b75d9f0/python/ray/rllib/test/tuned_examples.sh#L11">here</a>.</p>
+
+<p>This RL library is under development, and we are looking for contributions
+including implementations of more algorithms.</p>
+
+<h2 id="actor-fault-tolerance">Actor fault tolerance</h2>
+
+<p>We’ve enabled fault tolerance for actors as follows. If a machine fails, the
+actors that were running on that machine are recreated on other machines, and
+the tasks that previously executed on those actors are replayed to recreate the
+state of the actor. We are working on improving the speed of recovery by
+enabling actor state to be restored from checkpoints. See <a href="http://ray.readthedocs.io/en/latest/fault-tolerance.html">an overview of fault
+tolerance in Ray</a>.</p>
+
+
+  </div><a class="u-url" href="/2017/09/30/ray-0.2-release.html" hidden></a>
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">Ray: A fast and simple framework for distributed applications</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li class="p-name">Ray: A fast and simple framework for distributed applications</li><li><a class="u-email" href="mailto:"></a></li></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"><li><a href="https://github.com/ray-project"><svg class="svg-icon"><use xlink:href="/assets/minima-social-icons.svg#github"></use></svg> <span class="username">ray-project</span></a></li></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Ray is a fast and simple framework for building and running distributed applications.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+</body>
+
+</html>

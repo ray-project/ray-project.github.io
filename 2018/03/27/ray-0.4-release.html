@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.6.1 -->
+<title>Ray: 0.4 Release | Ray: A fast and simple framework for distributed applications</title>
+<meta name="generator" content="Jekyll v3.8.5" />
+<meta property="og:title" content="Ray: 0.4 Release" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="This post announces the release of Ray 0.4." />
+<meta property="og:description" content="This post announces the release of Ray 0.4." />
+<link rel="canonical" href="/2018/03/27/ray-0.4-release.html" />
+<meta property="og:url" content="/2018/03/27/ray-0.4-release.html" />
+<meta property="og:site_name" content="Ray: A fast and simple framework for distributed applications" />
+<meta property="og:type" content="article" />
+<meta property="article:published_time" content="2018-03-27T14:00:00+00:00" />
+<script type="application/ld+json">
+{"@type":"BlogPosting","headline":"Ray: 0.4 Release","dateModified":"2018-03-27T14:00:00+00:00","url":"/2018/03/27/ray-0.4-release.html","datePublished":"2018-03-27T14:00:00+00:00","mainEntityOfPage":{"@type":"WebPage","@id":"/2018/03/27/ray-0.4-release.html"},"description":"This post announces the release of Ray 0.4.","@context":"https://schema.org"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Ray: A fast and simple framework for distributed applications" /><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-110413294-2"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-110413294-2');
+</script>
+</head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Ray: A fast and simple framework for distributed applications</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title p-name" itemprop="name headline">Ray: 0.4 Release</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="2018-03-27T14:00:00+00:00" itemprop="datePublished">Mar 27, 2018
+      </time></p>
+  </header>
+
+  <div class="post-content e-content" itemprop="articleBody">
+    <p>We are pleased to announce the 0.4 release of <a href="https://github.com/ray-project/ray">Ray</a>. This release introduces
+improvements to Ray’s scheduling, substantial backend improvements, and the
+start of <a href="https://rise.cs.berkeley.edu/blog/pandas-on-ray/">Pandas on Ray</a>, as well as many improvements to <a href="http://ray.readthedocs.io/en/latest/rllib.html">RLlib</a> and
+<a href="http://ray.readthedocs.io/en/latest/tune.html">Tune</a> (you can read more about the improvements in RLlib in <a href="https://rise.cs.berkeley.edu/blog/distributed-policy-optimizers-for-scalable-and-reproducible-deep-rl/">this blog
+post</a>).</p>
+
+<p>To upgrade to the latest version, run</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>pip install -U ray
+</code></pre></div></div>
+
+<h2 id="scheduling">Scheduling</h2>
+
+<p>This release includes two major changes to the scheduling behavior: spillback
+scheduling and support for custom resources.</p>
+
+<h3 id="spillback-scheduling">Spillback Scheduling</h3>
+
+<p>Because Ray takes a bottom-up hierarchical approach to scheduling in which
+scheduling decisions are made by local schedulers on each machine (in order to
+avoid a centralized scheduling bottleneck), scheduling decisions are often made
+with a slightly stale view of the system state. As a consequence, it is possible
+for race conditions to occur and for too many tasks to be assigned to a single
+machine. For example, consider the case in which there are 100 GPUs scattered
+around the cluster and workers on the various machines submit a total of exactly
+100 GPU tasks. If these tasks take a while to execute, then the desired behavior
+is for one task to be assigned to each GPU. However, without a single scheduling
+bottleneck like a centralized scheduler, too many tasks may be assigned to a
+single machine resulting in delays.</p>
+
+<p>Spillback scheduling provides a mechanism for correcting for bad scheduling
+decisions. At a high-level, if a local scheduler decides that it does not want
+to execute a task, it can spill the task back to the global scheduler (or in
+principle to another local scheduler). This mechanism allows us to achieve
+perfect load balancing along with high task throughput.</p>
+
+<h3 id="custom-resources">Custom Resources</h3>
+
+<p>Remote functions and actors now support scheduling with <a href="http://ray.readthedocs.io/en/latest/resources.html">arbitrary custom
+resource requirements</a>. We can specify that a remote function requires 1 CPU, 2
+GPUs, and 3 of some custom resource with syntax like the following.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">@</span><span class="n">ray</span><span class="o">.</span><span class="n">remote</span><span class="p">(</span><span class="n">num_cpus</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_gpus</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">resources</span><span class="o">=</span><span class="p">{</span><span class="s">'Custom'</span><span class="p">:</span> <span class="mi">3</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">f</span><span class="p">():</span>
+    <span class="k">pass</span>
+</code></pre></div></div>
+
+<p>To tell Ray that a node has 6 of the custom resource, Ray should be started on
+that machine with a command like the following.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>ray start ... --resources='{"Custom": 6}'
+</code></pre></div></div>
+
+<p>Custom resources can be used for a variety of different purposes. For example,
+the can be used to do bookkeeping of a concrete resource like memory, or to
+indicate that a particular dataset lives on a particular machine, or to give
+machines certain roles (such as a “parameter server” machine or a “worker”
+machine).</p>
+
+<h2 id="libraries">Libraries</h2>
+
+<p>This release also includes the start of <a href="https://rise.cs.berkeley.edu/blog/pandas-on-ray/">Pandas on Ray</a>, which is a project
+aimed at speeding up <a href="https://pandas.pydata.org/">Pandas</a> DataFrames. It also includes substantial
+improvements to <a href="http://ray.readthedocs.io/en/latest/rllib.html">RLlib</a>, such as high-quality implementations of algorithms
+like <a href="https://arxiv.org/abs/1803.00933">Ape-X</a>, and substantial improvements to <a href="http://ray.readthedocs.io/en/latest/tune.html">Tune</a>, such as
+implementations of state of the art algorithms like <a href="http://ray.readthedocs.io/en/latest/pbt.html">Population Based
+Training</a>.</p>
+
+
+  </div><a class="u-url" href="/2018/03/27/ray-0.4-release.html" hidden></a>
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">Ray: A fast and simple framework for distributed applications</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li class="p-name">Ray: A fast and simple framework for distributed applications</li><li><a class="u-email" href="mailto:"></a></li></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"><li><a href="https://github.com/ray-project"><svg class="svg-icon"><use xlink:href="/assets/minima-social-icons.svg#github"></use></svg> <span class="username">ray-project</span></a></li></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Ray is a fast and simple framework for building and running distributed applications.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+</body>
+
+</html>
